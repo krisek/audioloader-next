@@ -22,6 +22,9 @@ import (
 	"path/filepath"
 	"regexp"
 
+	"io/ioutil"
+
+	"os/exec"
 
 )
 
@@ -41,9 +44,10 @@ type FileInfo struct {
 	Codec        string					`json:"codec,omitempty"`
 	Track        string					`json:"track,omitempty"`
 	Date         string					`json:"date,omitempty"`
-	Album         string					`json:"album,omitempty"`
-	Title         string					`json:"title,omitempty"`
+	Album        string					`json:"album,omitempty"`
+	Title        string					`json:"title,omitempty"`
 	
+	Stream       string                  `json:"stream,omitempty"`
 
 }
 
@@ -57,12 +61,29 @@ type MPDClientWrapper struct {
 }
 
 
+
 var (
 	redisClient *redis.Client
 	bandcamp_enabled = true
 	mpdClient *MPDClientWrapper
 	mpdClientPoll *MPDClientWrapper
 )
+
+
+// Initialize appConfig using environment variables, defaulting to localhost if not set
+var appConfig = struct {
+    MPDHost string
+}{
+    MPDHost: getEnv("MPD_HOST", "localhost"),
+}
+
+// Helper function to get environment variables with a default value
+func getEnv(key, defaultVal string) string {
+    if value, exists := os.LookupEnv(key); exists {
+        return value
+    }
+    return defaultVal
+}
 
 func NewMPDClientWrapper(address string) (*MPDClientWrapper, error) {
     client, err := mpd.Dial("tcp", address)
@@ -283,70 +304,50 @@ func coverHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func dataHandler(w http.ResponseWriter, r *http.Request) {
-    clientDataTree := map[string]interface{}{
-        "tree": []map[string]interface{}{},
-        "info": map[string]interface{}{},
-    }
-
-    data := r.URL.Path[1:]
-
-    mpdClient, err := NewMPDClientWrapper(fmt.Sprintf("%s:%s", appConfig.MPDHost, r.URL.Query().Get("mpd_port")))
-    if err != nil {
-        http.Error(w, "Failed to create MPD client", http.StatusInternalServerError)
-        return
-    }
-
-    defer mpdClient.Client().Disconnect()
-
-    mpdClient.EnsureConnection(fmt.Sprintf("%s:%s", appConfig.MPDHost, r.URL.Query().Get("mpd_port")))
-
-    clientData := readData(r.URL.Query().Get("client_id"), data)
-
-    for _, directory := range clientData[data] {
-        count := map[string]interface{}{}
-        treeData := map[string]interface{}{}
-
-        if directory != "/" && !strings.HasPrefix(directory, "http:") {
-            count, err = mpdClient.Client().Count("base", directory)
-            if err != nil {
-                log.Println("Failed to get count for", directory, err)
-                continue
-            }
-
-            seconds, err := strconv.Atoi(count["playtime"].(string))
-            if err != nil {
-                log.Println("Failed to parse playtime", err)
-                continue
-            }
-
-            duration := time.Duration(seconds) * time.Second
-            hours := fmt.Sprintf("%d", int(duration.Hours()))
-            minutes := fmt.Sprintf("%02d", int(duration.Minutes())%60)
-            secondsStr := fmt.Sprintf("%02d", int(duration.Seconds())%60)
-            playhours := fmt.Sprintf("%s:%s:%s", hours, minutes, secondsStr)
-
-            count["playhours"] = playhours
-
-            treeData = map[string]interface{}{
-                "directory": directory,
-                "count":     count,
-            }
-        } else if strings.HasPrefix(directory, "http:") {
-            treeData = map[string]interface{}{
-                "directory": directory,
-                "count":     nil,
-                "stream":    directory,
-            }
-        }
-
-        clientDataTree["tree"] = append(clientDataTree["tree"].([]map[string]interface{}), treeData)
-    }
-
-    clientDataTree["tree"] = reverse(clientDataTree["tree"].([]map[string]interface{}))
-
-    json.NewEncoder(w).Encode(clientDataTree)
+type ClientHistory struct {
+	History []string `json:"history"`
 }
+
+// readData reads the client's data from a JSON file.
+// readData reads client data from a JSON file.
+
+// readData reads client data from a JSON file and returns a ClientHistory struct.
+func readData(clientID string, dataType string) (ClientHistory, error) {
+	clientDB := os.Getenv("CLIENT_DB")
+	if clientDB == "" {
+		clientDB = "/tmp/audioloader-db"
+	}
+
+	// Construct the file path
+	clientDataFile := filepath.Join(clientDB, fmt.Sprintf("%s.%s.json", clientID, dataType))
+
+	// Validate clientID and file path
+	if clientID == "" || !filepath.HasPrefix(clientDataFile, clientDB) {
+		return ClientHistory{}, fmt.Errorf("invalid clientID or file path")
+	}
+
+	// Check for invalid characters in the clientID
+	if !regexp.MustCompile(`^[A-Za-z0-9_\-\.]+$`).MatchString(clientID) {
+		return ClientHistory{}, fmt.Errorf("invalid characters in clientID")
+	}
+
+	// Read the file
+	data, err := ioutil.ReadFile(clientDataFile)
+	if err != nil {
+		log.Printf("Warning: %s for %s not readable: %v\n", dataType, clientID, err)
+		return ClientHistory{}, nil
+	}
+
+	// Unmarshal JSON into ClientHistory struct for applicable types
+	var clientHistory ClientHistory
+	if err := json.Unmarshal(data, &clientHistory); err != nil {
+		log.Printf("Error parsing JSON for %s: %v\n", clientID, err)
+		return ClientHistory{}, err
+	}
+
+	return clientHistory, nil
+}
+
 
 func reverse(s []map[string]interface{}) []map[string]interface{} {
     a := make([]map[string]interface{}, len(s))
@@ -354,6 +355,12 @@ func reverse(s []map[string]interface{}) []map[string]interface{} {
         a[len(s)-1-i] = v
     }
     return a
+}
+
+func getRadioStationURL(stationUUID string) string {
+	// Placeholder for pyradios implementation
+	// Replace this with the actual implementation later
+	return ""
 }
 
 func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
@@ -458,8 +465,80 @@ func bandcampHistoryHandler(w http.ResponseWriter, r *http.Request) {
 	// Implement bandcamp history handler
 }
 
+
+func isHTTP(s string) bool {
+    return strings.HasPrefix(s, "http:")
+}
+
+func formatPlaytime(playtime int) string {
+    hours := playtime / 3600
+    minutes := (playtime % 3600) / 60
+    seconds := playtime % 60
+    return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+}
+
 func dataHandler(w http.ResponseWriter, r *http.Request) {
-	// Implement data handler
+	clientDataTree := map[string]interface{}{
+        "tree": []interface{}{},
+        "info": map[string]interface{}{},
+    }
+	clientID := r.URL.Query().Get("client_id")
+	dataPath := r.URL.Path[1:]
+
+	log.Printf("%v - %v", clientID, dataPath)
+    clientHistory, err := readData(clientID, dataPath)
+	if err != nil {
+		log.Printf("readData failed %s: %v\n", clientID, err)
+	}
+	log.Printf("%v", clientHistory)
+	var fileInfos []FileInfo
+
+	for _, directory := range clientHistory.History {
+		log.Printf("processing %v", directory)
+		directoryStr := directory
+        if directoryStr != "/" && !isHTTP(directoryStr) {
+            count, err := mpdClient.Client().Count("base", directoryStr)
+            if err != nil {
+                log.Printf("Could not get count for %s: %v\n", directoryStr, err)
+                continue
+            }
+			seconds, err := strconv.Atoi(count[1])
+
+            fileInfo := FileInfo{
+				Directory:    directoryStr,
+				Count: map[string]interface{}{
+					"playhours": formatPlaytime(seconds),
+					"playtime":  count[1],
+					"songs":     count[0],
+				},
+			}
+			fileInfos = append(fileInfos, fileInfo)
+
+        } else if isHTTP(directoryStr) {
+           
+			
+			fileInfo := FileInfo{
+				Directory:    directoryStr,
+				Stream:       directoryStr,
+			}
+			
+			fileInfos = append(fileInfos, fileInfo)
+
+        }
+		log.Printf("fileInfos %v", fileInfos)
+    }
+
+	for i, j := 0, len(fileInfos)-1; i < j; i, j = i+1, j-1 {
+		fileInfos[i], fileInfos[j] = fileInfos[j], fileInfos[i]
+	}
+
+	clientDataTree["tree"] = fileInfos
+
+    // Write the response
+    json.NewEncoder(w).Encode(clientDataTree)
+
+
+
 }
 
 func searchRadioHandler(w http.ResponseWriter, r *http.Request) {
@@ -477,7 +556,7 @@ func removeHistoryHandler(w http.ResponseWriter, r *http.Request) {
 func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
     var content map[string]interface{} = make(map[string]interface{})
     var err error
-
+	log.Printf("mpdProxyHandler url: %v", r.URL.Path)
     switch r.URL.Path {
     case "/play":
         err = mpdClient.Client().Play(-1)
@@ -578,7 +657,9 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 	
 		// Add directories to fileInfos
 		for directory := range resultDirectories {
+
 			subDirCount, err := mpdClient.Client().Count("base", directory)
+			log.Printf("subDirCount: %v", subDirCount)
 			if err != nil {
 				http.Error(w, "Failed to count", http.StatusInternalServerError)
 				return
@@ -607,110 +688,63 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 	
 		content["tree"] = fileInfos
 
-		case "/ls":
-			directory := r.URL.Query().Get("directory")
-			if directory == "" {
-				directory = "/"
+
+	case "/ls":
+		directory := r.URL.Query().Get("directory")
+		if directory == "" {
+			directory = "/"
+		}
+		if directory == "." {
+			directory = "/"
+		}
+		listFiles, err := mpdClient.Client().ListInfo(directory)
+		if err != nil {
+			log.Printf("%v", err)
+			http.Error(w, "Failed to list files", http.StatusInternalServerError)
+			return
+		}
+	
+		lsInfo := listFiles
+
+		var count []string
+
+		if directory != "/" {
+			count, err = mpdClient.Client().Count("base", directory)
+		} else {
+			count, err = mpdClient.Client().Count("modified-since", "0")
+		}
+		log.Printf("count: %v", count)
+	
+		musicFiles := make(map[string]bool)
+		for _, file := range lsInfo {
+			file := file["file"]
+			musicFiles[filepath.Base(file)] = true
+		}
+		for _, fileRecord := range listFiles {
+			file := fileRecord["file"]
+			if _, ok := musicFiles[filepath.Base(file)]; !ok {
+				fileRecord["file"] = directory + "/" + file
+				lsInfo = append(lsInfo, fileRecord)
 			}
-			if directory == "." {
-				directory = "/"
-			}
-			listFiles, err := mpdClient.Client().ListInfo(directory)
-			if err != nil {
-				log.Printf("%v", err)
-				http.Error(w, "Failed to list files", http.StatusInternalServerError)
-				return
-			}
-		
-			lsInfo := listFiles
-		
-			var count []string
-			if directory != "/" {
-				count, err = mpdClient.Client().Count("base", directory)
-				if err != nil {
-					http.Error(w, "Failed to count", http.StatusInternalServerError)
-					return
-				}
-			} else {
-				count, err = mpdClient.Client().Count("modified-since", "0")
-				if err != nil {
-					http.Error(w, "Failed to count", http.StatusInternalServerError)
-					return
-				}
-			}
-		
-			log.Printf("count: %v", count)
-		
-			musicFiles := make(map[string]bool)
-			for _, file := range lsInfo {
-				file := file["file"]
-				musicFiles[filepath.Base(file)] = true
-			}
-			for _, fileRecord := range listFiles {
-				file := fileRecord["file"]
-				if _, ok := musicFiles[filepath.Base(file)]; !ok {
-					fileRecord["file"] = directory + "/" + file
-					lsInfo = append(lsInfo, fileRecord)
-				}
-			}
-			log.Printf("lsinfo g2: %v", lsInfo)
-		
-			// Adjusting the info structure
-			info := map[string]string{
-				"playtime": count[1],
-				"songs":    count[0],
-			}
-			content["info"] = info
-		
-			// Adjusting the tree structure
-			var fileInfos []FileInfo
-			log.Printf("iterating lsinfo")
-			for _, name := range lsInfo {
-				log.Printf("name: %v", name)
-				dir := name["directory"]
-				if dir == "" {
-					fileInfo := FileInfo{
-						LastModified: name["last-modified"],
-						Artist:      name["artist"],
-						Album:      name["album"],
-						File:        name["file"],
-						Format:      name["format"],
-						// Add additional fields here
-						Duration:    name["duration"],
-						Genre:       name["genre"],
-						Codec:       name["codec"],
-						Track:       name["track"],
-						Date:        name["date"],
-						Title:        name["title"],
-					}
-					fileInfos = append(fileInfos, fileInfo)
-					continue
-				}
-				subDir := dir
-				subDirCount, err := mpdClient.Client().Count("base", subDir)
-				if err != nil {
-					http.Error(w, "Failed to count", http.StatusInternalServerError)
-					return
-				}
-				seconds, err := strconv.Atoi(subDirCount[1])
-				if err != nil {
-					http.Error(w, "Failed to parse count", http.StatusInternalServerError)
-					return
-				}
-				duration := time.Duration(seconds) * time.Second
-				hours := fmt.Sprintf("%d", int(duration.Hours()))
-				minutes := fmt.Sprintf("%02d", int(duration.Minutes())%60)
-				secondsStr := fmt.Sprintf("%02d", int(duration.Seconds())%60)
-				playhours := fmt.Sprintf("%s:%s:%s", hours, minutes, secondsStr)
-		
+		}
+		log.Printf("lsinfo g2: %v", lsInfo)
+	
+		// Adjusting the info structure
+		info := map[string]string{
+			"playtime": count[1],
+			"songs":    count[0],
+		}
+		content["info"] = info
+	
+		// Adjusting the tree structure
+		var fileInfos []FileInfo
+		log.Printf("iterating lsinfo")
+		for _, name := range lsInfo {
+			log.Printf("name: %v", name)
+			dir := name["directory"]
+			if dir == "" {
 				fileInfo := FileInfo{
-					Directory:    dir,
 					LastModified: name["last-modified"],
-					Count: map[string]interface{}{
-						"playhours": playhours,
-						"playtime":  subDirCount[1],
-						"songs":     subDirCount[0],
-					},
 					Artist:      name["artist"],
 					Album:      name["album"],
 					File:        name["file"],
@@ -724,10 +758,136 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 					Title:        name["title"],
 				}
 				fileInfos = append(fileInfos, fileInfo)
+				continue
 			}
+			subDir := dir
+
+			subDirCount, err := mpdClient.Client().Count("base", dir)
+			log.Printf("subDirCount: %v", subDirCount)
+			seconds, err := strconv.Atoi(subDirCount[1])
+			if err != nil {
+				http.Error(w, "Failed to parse count", http.StatusInternalServerError)
+				return
+			}
+			duration := time.Duration(seconds) * time.Second
+			hours := fmt.Sprintf("%d", int(duration.Hours()))
+			minutes := fmt.Sprintf("%02d", int(duration.Minutes())%60)
+			secondsStr := fmt.Sprintf("%02d", int(duration.Seconds())%60)
+			playhours := fmt.Sprintf("%s:%s:%s", hours, minutes, secondsStr)
+	
+			fileInfo := FileInfo{
+				Directory:    subDir,
+				LastModified: name["last-modified"],
+				Count: map[string]interface{}{
+					"playhours": playhours,
+					"playtime":  subDirCount[1],
+					"songs":     subDirCount[0],
+				},
+				Artist:      name["artist"],
+				Album:      name["album"],
+				File:        name["file"],
+				Format:      name["format"],
+				// Add additional fields here
+				Duration:    name["duration"],
+				Genre:       name["genre"],
+				Codec:       name["codec"],
+				Track:       name["track"],
+				Date:        name["date"],
+				Title:        name["title"],
+			}
+			fileInfos = append(fileInfos, fileInfo)
+		}
+	
+		log.Printf("fileInfos: %v", fileInfos)
+		content["tree"] = fileInfos
+	
+	case "/addplay":
+		// var playables []string
+		playable := r.URL.Query().Get("directory")
+		if playable == "" {
+			playable = r.URL.Query().Get("url")
+		}
+
+		// Check if the playable URL is a radio station
+		if r.URL.Query().Get("stationuuid") != "" && !strings.Contains(playable, "bandcamp.com") && !strings.Contains(playable, "youtube") && !strings.Contains(playable, "youtu.be") {
+			// Placeholder for pyradios implementation
+			stationURL := getRadioStationURL(r.URL.Query().Get("stationuuid"))
+			playable = stationURL
+		}
 		
-			log.Printf("fileInfos: %v", fileInfos)
-			content["tree"] = fileInfos
+		// Check if the playable URL is a YouTube video
+		if strings.Contains(playable, "youtube") || strings.Contains(playable, "youtu.be") || strings.Contains(playable, "bandcamp.com") {
+			// Use yt-dlp command line to get the video URL
+			cmd := exec.Command("yt-dlp", "-f", "bestaudio", "-g", playable)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			playable = string(output)
+		}
+		
+		log.Printf("%v", playable)
+		
+		mpdClient.Client().Consume(true)
+		mpdClient.Client().Add(playable)
+		mpdClient.Client().Play(0)
+	
+		// Manage history
+		clientID := r.URL.Query().Get("client_id")
+		if clientID != "" {
+			clientHistory, err := readData(clientID, "history")
+			if err != nil {
+				log.Println(err)
+			}
+			
+			// Check if 'playable' exists in the client history
+			for i, item := range clientHistory.History {
+				if item == playable {
+					// Remove the item from history
+					clientHistory.History = append(clientHistory.History[:i], clientHistory.History[i+1:]...)
+					break
+				}
+			}
+
+			clientHistory.History = append(clientHistory.History, playable)
+
+			// Limit the history to the last 10 items
+			if len(clientHistory.History) > 10 {
+				clientHistory.History = clientHistory.History[len(clientHistory.History)-10:]
+			}
+
+			clientDB := os.Getenv("CLIENT_DB")
+			if clientDB == "" {
+				clientDB = "/tmp/audioloader-db"
+			}
+
+			clientHistoryFile := filepath.Join(clientDB, fmt.Sprintf("%s.history.json", clientID))
+
+			// Validate the client ID and file path
+			re := regexp.MustCompile(`[^A-Za-z0-9_\-\.]`)
+			if clientID != "" && filepath.HasPrefix(clientHistoryFile, clientDB) && re.MatchString(clientHistoryFile) {
+				// Write the updated history back to the file
+				file, err := os.Create(clientHistoryFile)
+				if err != nil {
+					http.Error(w, "Unable to write file", http.StatusInternalServerError)
+					return
+				}
+				defer file.Close()
+
+				// Write JSON data to file
+				encoder := json.NewEncoder(file)
+				if err := encoder.Encode(clientHistory); err != nil {
+					http.Error(w, "Failed to write JSON data", http.StatusInternalServerError)
+					return
+				}
+			}			
+
+
+		}
+
+
+	
 	default:
         http.Error(w, "Not Found", http.StatusNotFound)
         return
@@ -809,9 +969,11 @@ func processCurrentSong(currentsong map[string]interface{}) map[string]interface
 			currentsong[state] = true
 		}
 	}
+	log.Printf("currentsong title: %v", currentsong["title"])
 
 	// Set title and display titles
-	if _, ok := currentsong["title"]; !ok {
+
+	if currentsong["Title"] == "" {
 		if file, ok := currentsong["file"]; ok {
 			currentsong["title"] = file
 			currentsong["display_title"] = file
@@ -819,18 +981,18 @@ func processCurrentSong(currentsong map[string]interface{}) map[string]interface
 		}
 	} else {
 		titleElements := []string{}
-		if track, ok := currentsong["track"].(string); ok {
+		if track, ok := currentsong["Track"].(string); ok {
 			titleElements = append(titleElements, track)
 		}
-		if title, ok := currentsong["title"].(string); ok {
+		if title, ok := currentsong["Title"].(string); ok {
 			titleElements = append(titleElements, title)
 		}
 
 		albumElements := []string{}
-		if artist, ok := currentsong["artist"].(string); ok {
+		if artist, ok := currentsong["Artist"].(string); ok {
 			albumElements = append(albumElements, artist)
 		}
-		if album, ok := currentsong["album"].(string); ok {
+		if album, ok := currentsong["Album"].(string); ok {
 			albumElements = append(albumElements, album)
 		}
 
@@ -926,7 +1088,9 @@ func countHandler(w http.ResponseWriter, r *http.Request) {
 
 
 	// Get the count of the specified directory
+
 	count, err := mpdClient.Client().Count("base", directory)
+
 	if err != nil {
 		http.Error(w, "Failed to get count", http.StatusInternalServerError)
 		log.Printf("Failed to get count: %v", err)
