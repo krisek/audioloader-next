@@ -25,6 +25,8 @@ import (
 	"io/ioutil"
 
 	"os/exec"
+	"math/rand"
+	"sync"
 
 )
 
@@ -56,10 +58,6 @@ type FileInfo struct {
 var ctx = context.Background()
 
 
-type MPDClientWrapper struct {
-    client *mpd.Client
-}
-
 
 
 var (
@@ -67,6 +65,7 @@ var (
 	bandcamp_enabled = true
 	mpdClient *MPDClientWrapper
 	mpdClientPoll *MPDClientWrapper
+	clientDB string
 )
 
 
@@ -77,6 +76,16 @@ var appConfig = struct {
     MPDHost: getEnv("MPD_HOST", "localhost"),
 }
 
+
+func init() {
+	clientDB = os.Getenv("CLIENT_DB")
+	if clientDB == "" {
+		clientDB = "/tmp/audioloader-db"
+	}
+}
+
+
+
 // Helper function to get environment variables with a default value
 func getEnv(key, defaultVal string) string {
     if value, exists := os.LookupEnv(key); exists {
@@ -84,6 +93,12 @@ func getEnv(key, defaultVal string) string {
     }
     return defaultVal
 }
+
+type MPDClientWrapper struct {
+    client *mpd.Client
+	mu     sync.Mutex
+}
+
 
 func NewMPDClientWrapper(address string) (*MPDClientWrapper, error) {
     client, err := mpd.Dial("tcp", address)
@@ -94,12 +109,15 @@ func NewMPDClientWrapper(address string) (*MPDClientWrapper, error) {
 }
 
 func (w *MPDClientWrapper) Reconnect(address string) error {
-    var err error
     backoff := time.Second
     for {
         log.Println("Attempting to reconnect to MPD...")
-        w.client, err = mpd.Dial("tcp", address)
+
+        client, err := mpd.Dial("tcp", address)
         if err == nil {
+            w.mu.Lock()
+            w.client = client
+            w.mu.Unlock()
             log.Println("Reconnected to MPD")
             return nil
         }
@@ -113,26 +131,41 @@ func (w *MPDClientWrapper) Reconnect(address string) error {
     }
 }
 
-
-
 func (w *MPDClientWrapper) Client() *mpd.Client {
+    w.mu.Lock()
+    defer w.mu.Unlock()
     return w.client
 }
 
 func (w *MPDClientWrapper) EnsureConnection(address string) {
     go func() {
         for {
-            err := w.client.Ping()
+            w.mu.Lock()
+            client := w.client
+            w.mu.Unlock()
+
+            if client == nil {
+                log.Println("MPD client is nil. Attempting to reconnect...")
+                if err := w.Reconnect(address); err != nil {
+                    log.Printf("Failed to reconnect to MPD: %v", err)
+                }
+                continue
+            }
+
+            err := client.Ping()
             if err != nil {
                 log.Println("MPD connection lost. Reconnecting...")
-                if reconnectErr := w.Reconnect(address); reconnectErr != nil {
-                    log.Fatalf("Failed to reconnect to MPD: %v", reconnectErr)
+                if err := w.Reconnect(address); err != nil {
+                    log.Printf("Failed to reconnect to MPD: %v", err)
                 }
             }
+            
             time.Sleep(10 * time.Second) // Adjust the interval as necessary
         }
     }()
 }
+
+
 
 func main() {
 
@@ -304,48 +337,52 @@ func coverHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 
-type ClientHistory struct {
-	History []string `json:"history"`
+type ClientData struct {
+	History []string `json:"history,omitempty"`
+	Randomset []string `json:"randomset,omitempty"`
+	Favourites []string `json:"favourites,omitempty"`
+	RadioHistory []string `json:"radio_history,omitempty"`
+	BandcampHistory []string `json:"bandcamp_history,omitempty"`
+
 }
 
 // readData reads the client's data from a JSON file.
 // readData reads client data from a JSON file.
 
-// readData reads client data from a JSON file and returns a ClientHistory struct.
-func readData(clientID string, dataType string) (ClientHistory, error) {
-	clientDB := os.Getenv("CLIENT_DB")
-	if clientDB == "" {
-		clientDB = "/tmp/audioloader-db"
-	}
-
+// readData reads client data from a JSON file and returns a ClientData struct.
+// readData reads client data from a JSON file and returns a ClientData struct.
+func readData(clientID string, dataType string) (ClientData, error) {
 	// Construct the file path
 	clientDataFile := filepath.Join(clientDB, fmt.Sprintf("%s.%s.json", clientID, dataType))
 
 	// Validate clientID and file path
 	if clientID == "" || !filepath.HasPrefix(clientDataFile, clientDB) {
-		return ClientHistory{}, fmt.Errorf("invalid clientID or file path")
+		return ClientData{}, fmt.Errorf("invalid clientID or file path")
 	}
 
 	// Check for invalid characters in the clientID
 	if !regexp.MustCompile(`^[A-Za-z0-9_\-\.]+$`).MatchString(clientID) {
-		return ClientHistory{}, fmt.Errorf("invalid characters in clientID")
+		return ClientData{}, fmt.Errorf("invalid characters in clientID")
 	}
 
 	// Read the file
 	data, err := ioutil.ReadFile(clientDataFile)
 	if err != nil {
 		log.Printf("Warning: %s for %s not readable: %v\n", dataType, clientID, err)
-		return ClientHistory{}, nil
+		return ClientData{}, fmt.Errorf("not readable")
 	}
 
-	// Unmarshal JSON into ClientHistory struct for applicable types
-	var clientHistory ClientHistory
-	if err := json.Unmarshal(data, &clientHistory); err != nil {
+	// Log the data as a string for debugging
+	log.Printf("readData - data read: %s", string(data))
+
+	// Unmarshal JSON into ClientData struct
+	var clientdata ClientData
+	if err := json.Unmarshal(data, &clientdata); err != nil {
 		log.Printf("Error parsing JSON for %s: %v\n", clientID, err)
-		return ClientHistory{}, err
+		return ClientData{}, fmt.Errorf("Cannot encode")
 	}
 
-	return clientHistory, nil
+	return clientdata, nil
 }
 
 
@@ -365,6 +402,8 @@ func getRadioStationURL(stationUUID string) string {
 
 func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
 	var err error
+	
+	log.Printf("Starting to poll")
 
 	mpdClientPoll, err = NewMPDClientWrapper("localhost:6600")
 	if err != nil {
@@ -386,28 +425,36 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
 		}
         done <- true
     }()
+
+	log.Printf("Back from poll")
+
     select {
     case <-done:
         // MPD event received
+		log.Printf("Something happened")
     case <-time.After(timeout):
         // Timeout occurred
         log.Printf("Timeout waiting for MPD events")
     }
 
     // Get current song and status
-    currentsong, err := mpdClientPoll.Client().CurrentSong()
+    currentsong, err := mpdClient.Client().CurrentSong()
+
+
     if err != nil {
-        http.Error(w, "Failed to get current song", http.StatusInternalServerError)
-        log.Printf("Failed to get current song: %v", err)
-        return
+        // http.Error(w, "Failed to get current song", http.StatusInternalServerError)
+        log.Printf("Failed to get current song in pollCurrentSongHandler: %v", err)
+    }
+	log.Printf("CurrentSong: %v", currentsong)
+    
+    status, err := mpdClient.Client().Status()
+    if err != nil {
+        // http.Error(w, "Failed to get status", http.StatusInternalServerError)
+        log.Printf("Failed to get status in pollCurrentSongHandler: %v", err)
     }
 
-    status, err := mpdClientPoll.Client().Status()
-    if err != nil {
-        http.Error(w, "Failed to get status", http.StatusInternalServerError)
-        log.Printf("Failed to get status: %v", err)
-        return
-    }
+
+	log.Printf("Status: %v", status)
 
     // Convert mpd.Attrs to map[string]interface{}
     currentsongMap := make(map[string]interface{})
@@ -423,8 +470,12 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
     currentsongMap["bandcamp_enabled"] = bandcamp_enabled
     currentsongMap["default_stream"] = "http://" + os.Getenv("hostname") + ":8000/audio.ogg"
 
+	log.Printf("currentsongMap: %v", currentsongMap)
+
     // Process current song
     currentsongMap = processCurrentSong(currentsongMap)
+
+	log.Printf("currentsongMap g2: %v", currentsongMap)
 
     // Convert map[string]interface{} back to mpd.Attrs
     processedSong := make(mpd.Attrs)
@@ -432,9 +483,21 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
         processedSong[k] = fmt.Sprintf("%v", v)
     }
 
+	log.Printf("Data return: %v", processedSong)
+
     // Return the content as JSON
     w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(processedSong)
+
+	encode_err := json.NewEncoder(w).Encode(processedSong)
+	if encode_err != nil {
+		// Log the error
+		log.Printf("Error encoding JSON response: %v", encode_err)
+		
+		emptyResponse := map[string]interface{}{}
+		json.NewEncoder(w).Encode(emptyResponse)
+	}
+
+
 }
 
 func kodiHandler(w http.ResponseWriter, r *http.Request) {
@@ -445,26 +508,278 @@ func upnpHandler(w http.ResponseWriter, r *http.Request) {
 	// Implement UPnP handler
 }
 
-func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
-	// Implement generate random set handler
+func randomChoice(albums []string, k int) []string {
+	n := len(albums)
+	if k >= n {
+		k = n
+	}
+	shuffled := make([]string, n)
+	copy(shuffled, albums)
+	rand.Shuffle(n, func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+	return shuffled[:k]
 }
 
+func uniqueStrings(input []string) []string {
+	uniqueMap := make(map[string]bool)
+	var result []string
+	for _, item := range input {
+		if _, exists := uniqueMap[item]; !exists {
+			uniqueMap[item] = true
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func isValidFileName(fileName string) bool {
+	return regexp.MustCompile(`^[A-Za-z0-9_\-\.\/]+$`).MatchString(fileName)
+}
+
+
+func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
+	clientID := r.URL.Query().Get("client_id")
+	
+	filter := r.URL.Query().Get("set_filter")
+	clientData := ClientData{Randomset: []string{}}
+	artists := make(map[string]bool)
+
+	albums, err := mpdClient.Client().List("album")
+	if err != nil {
+		log.Printf("Error listing albums: %v\n", err)
+		http.Error(w, "failed to generate randomset", http.StatusInternalServerError)
+		return
+	}
+	
+	
+
+	rand.Seed(time.Now().UnixNano()) // Seed for randomness
+
+	for i := 0; len(clientData.Randomset) < 12 && i < 20; i++ {
+		randomAlbums := randomChoice(albums, 12) // Get 12 random albums
+		
+		for _, album := range randomAlbums {
+			albumData, err := mpdClient.Client().Search("album", album)
+			if err != nil {
+				log.Printf("Error searching album %s: %v\n", album, err)
+				continue
+			}
+
+			if len(albumData) == 0 {
+				continue
+			}
+
+			artist := albumData[0]["Artist"]
+			if _, exists := artists[artist]; exists {
+				continue
+			}
+
+			if filter == "" || !regexp.MustCompile(filter).MatchString(albumData[0]["file"]) {
+				clientData.Randomset = append(clientData.Randomset, filepath.Dir(albumData[0]["file"]))
+				artists[artist] = true
+			}
+		}
+	}
+
+	
+	// Ensure randomset has unique albums and limit to 12
+	clientData.Randomset = uniqueStrings(clientData.Randomset)[:min(12, len(clientData.Randomset))]
+	log.Printf("clientdata unique - %v", clientData.Randomset)
+
+	
+	// Save to file
+	clientDataFile := filepath.Join(clientDB, fmt.Sprintf("%s.randomset.json", clientID))
+
+	log.Printf("clientDataFile - %v", clientDataFile)
+	log.Printf("filepath.HasPrefix(clientDataFile, clientDB)- %v %v", filepath.HasPrefix(clientDataFile, clientDB), isValidFileName(clientDataFile))
+	if clientID != "" && filepath.HasPrefix(clientDataFile, clientDB) && isValidFileName(clientDataFile) {
+		file, err := os.Create(clientDataFile)
+		log.Printf("clientDataFile created %v", clientDataFile)
+		if err != nil {
+			log.Printf("Error writing randomset file: %v\n", err)
+			http.Error(w, "failed to save randomset", http.StatusInternalServerError)
+			return
+		}
+		defer file.Close()
+
+		encoder := json.NewEncoder(file)
+		if err := encoder.Encode(clientData); err != nil {
+			log.Printf("Error encoding JSON: %v\n", err)
+			http.Error(w, "failed to save randomset", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Send OK response
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"result": "ok"}`))
+
+
+}
+
+// WriteData writes client data to a JSON file.
+func writeData(clientID, dataType string, clientData ClientData) error {
+    clientDataFile := filepath.Join(clientDB, fmt.Sprintf("%s.%s.json", clientID, dataType))
+
+    if clientID == "" || !filepath.HasPrefix(clientDataFile, clientDB) {
+        return fmt.Errorf("invalid clientID or file path")
+    }
+
+    if !regexp.MustCompile(`^[A-Za-z0-9_\-\.]+$`).MatchString(clientID) {
+        return fmt.Errorf("invalid characters in clientID")
+    }
+
+    data, err := json.Marshal(clientData)
+    if err != nil {
+        return err
+    }
+
+    return os.WriteFile(clientDataFile, data, 0644)
+}
+
+// FavouritesHandler handles adding or removing favourites.
 func favouritesHandler(w http.ResponseWriter, r *http.Request) {
-	// Implement favourites handler
+    clientID := r.URL.Query().Get("client_id")
+    if clientID == "" {
+        http.Error(w, "client_id is required", http.StatusBadRequest)
+        return
+    }
+
+    directory := r.URL.Query().Get("directory")
+    if directory == "" {
+        directory = "."
+    }
+
+    // Read existing favourites data
+    clientData, err := readData(clientID, "favourites")
+    if err != nil {
+        log.Printf("readData failed for favourites %s: %v\n", clientID, err)
+        // http.Error(w, "Failed to load favourites", http.StatusInternalServerError)
+        // return
+    }
+
+	if clientData.Favourites == nil {
+        clientData.Favourites = []string{}
+    }	
+
+    // Handle adding or removing favourite
+    path := r.URL.Path
+    if path == "/add_favourite" {
+        if !contains(clientData.Favourites, directory) {
+            clientData.Favourites = append(clientData.Favourites, directory)
+        }
+    } else if path == "/remove_favourite" {
+        clientData.Favourites = remove(clientData.Favourites, directory)
+    } else {
+        http.Error(w, "Invalid endpoint", http.StatusBadRequest)
+        return
+    }
+
+    // Write updated data back to the file
+    if err := writeData(clientID, "favourites", clientData); err != nil {
+        log.Printf("writeData failed for favourites %s: %v\n", clientID, err)
+        http.Error(w, "Failed to save favourites", http.StatusInternalServerError)
+        return
+    }
+
+    // Respond with success
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{"result": "ok"})
+}
+
+// Helper function to check if a slice contains a specific item
+func contains(slice []string, item string) bool {
+    for _, a := range slice {
+        if a == item {
+            return true
+        }
+    }
+    return false
+}
+
+// Helper function to remove an item from a slice
+func remove(slice []string, item string) []string {
+    for i, a := range slice {
+        if a == item {
+            return append(slice[:i], slice[i+1:]...)
+        }
+    }
+    return slice
 }
 
 func activePlayersHandler(w http.ResponseWriter, r *http.Request) {
 	// Implement active players handler
 }
 
+
 func radioHistoryHandler(w http.ResponseWriter, r *http.Request) {
-	// Implement radio history handler
+    clientID := r.URL.Query().Get("client_id")
+    if clientID == "" {
+        http.Error(w, "client_id is required", http.StatusBadRequest)
+        return
+    }
+
+    clientData, err := readData(clientID, "radio_history")
+    if err != nil {
+        log.Printf("readData failed for radio_history %s: %v\n", clientID, err)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tree": []interface{}{},
+			"info": map[string]interface{}{},
+			})
+		return
+    }
+
+    // Return the clientData in JSON format
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(clientData); err != nil {
+        log.Printf("Failed to encode radio history data for %s: %v\n", clientID, err)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tree": []interface{}{},
+			"info": map[string]interface{}{},
+			})
+		return
+    }
 }
 
 func bandcampHistoryHandler(w http.ResponseWriter, r *http.Request) {
-	// Implement bandcamp history handler
-}
+    clientID := r.URL.Query().Get("client_id")
+    if clientID == "" {
+        http.Error(w, "client_id is required", http.StatusBadRequest)
+        return
+    }
 
+    clientData, err := readData(clientID, "bandcamp_history")
+    w.Header().Set("Content-Type", "application/json")
+
+	if err != nil {
+        log.Printf("readData failed for bandcamp_history %s: %v\n", clientID, err)
+        // http.Error(w, "Failed to load bandcamp history", http.StatusInternalServerError)
+        // return
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tree": []interface{}{},
+			"info": map[string]interface{}{},
+			})
+		return
+    }
+
+    // Return the clientData in JSON format
+    
+    if err := json.NewEncoder(w).Encode(clientData); err != nil {
+        log.Printf("Failed to encode bandcamp history data for %s: %v\n", clientID, err)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tree": []interface{}{},
+			"info": map[string]interface{}{},
+			})
+		// http.Error(w, "Failed to encode data", http.StatusInternalServerError)
+        return
+    }
+}
 
 func isHTTP(s string) bool {
     return strings.HasPrefix(s, "http:")
@@ -477,68 +792,98 @@ func formatPlaytime(playtime int) string {
     return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 }
 
+func capitalizeFirstLetter(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	// Capitalize the first letter and append the rest of the string
+	return strings.ToUpper(string(s[0])) + s[1:]
+}
+
 func dataHandler(w http.ResponseWriter, r *http.Request) {
 	clientDataTree := map[string]interface{}{
-        "tree": []interface{}{},
-        "info": map[string]interface{}{},
-    }
+		"tree": []interface{}{},
+		"info": map[string]interface{}{},
+	}
+
 	clientID := r.URL.Query().Get("client_id")
 	dataPath := r.URL.Path[1:]
 
 	log.Printf("%v - %v", clientID, dataPath)
-    clientHistory, err := readData(clientID, dataPath)
+
+	// Read the data based on the path (history, randomset, etc.)
+	ClientData, err := readData(clientID, dataPath)
 	if err != nil {
 		log.Printf("readData failed %s: %v\n", clientID, err)
 	}
-	log.Printf("%v", clientHistory)
-	var fileInfos []FileInfo
 
-	for _, directory := range clientHistory.History {
-		log.Printf("processing %v", directory)
-		directoryStr := directory
-        if directoryStr != "/" && !isHTTP(directoryStr) {
-            count, err := mpdClient.Client().Count("base", directoryStr)
-            if err != nil {
-                log.Printf("Could not get count for %s: %v\n", directoryStr, err)
-                continue
-            }
-			seconds, err := strconv.Atoi(count[1])
+	// Function to process the data for any string slice (History, Randomset, etc.)
+	processDirectories := func(directories []string) []FileInfo {
+		var fileInfos []FileInfo
 
-            fileInfo := FileInfo{
-				Directory:    directoryStr,
-				Count: map[string]interface{}{
-					"playhours": formatPlaytime(seconds),
-					"playtime":  count[1],
-					"songs":     count[0],
-				},
+		for _, directory := range directories {
+			log.Printf("processing %v", directory)
+			directoryStr := directory
+
+			// If it's not a root or HTTP directory
+			if directoryStr != "/" && !isHTTP(directoryStr) {
+				count, err := mpdClient.Client().Count("base", directoryStr)
+				if err != nil {
+					log.Printf("Could not get count for %s: %v\n", directoryStr, err)
+					continue
+				}
+				seconds, err := strconv.Atoi(count[1])
+
+				fileInfo := FileInfo{
+					Directory: directoryStr,
+					Count: map[string]interface{}{
+						"playhours": formatPlaytime(seconds),
+						"playtime":  count[1],
+						"songs":     count[0],
+					},
+				}
+				fileInfos = append(fileInfos, fileInfo)
+			} else if isHTTP(directoryStr) {
+				// Handle HTTP directory
+				fileInfo := FileInfo{
+					Directory: directoryStr,
+					Stream:    directoryStr,
+				}
+				fileInfos = append(fileInfos, fileInfo)
 			}
-			fileInfos = append(fileInfos, fileInfo)
+		}
 
-        } else if isHTTP(directoryStr) {
-           
-			
-			fileInfo := FileInfo{
-				Directory:    directoryStr,
-				Stream:       directoryStr,
-			}
-			
-			fileInfos = append(fileInfos, fileInfo)
+		// Reverse the fileInfos slice
+		for i, j := 0, len(fileInfos)-1; i < j; i, j = i+1, j-1 {
+			fileInfos[i], fileInfos[j] = fileInfos[j], fileInfos[i]
+		}
 
-        }
-		log.Printf("fileInfos %v", fileInfos)
-    }
-
-	for i, j := 0, len(fileInfos)-1; i < j; i, j = i+1, j-1 {
-		fileInfos[i], fileInfos[j] = fileInfos[j], fileInfos[i]
+		return fileInfos
 	}
 
+	// Process different fields in ClientData
+	var fileInfos []FileInfo
+
+	// Check if History has data and process it
+	if len(ClientData.History) > 0 {
+		fileInfos = append(fileInfos, processDirectories(ClientData.History)...)
+	}
+
+	// Check if Randomset has data and process it
+	if len(ClientData.Randomset) > 0 {
+		fileInfos = append(fileInfos, processDirectories(ClientData.Randomset)...)
+	}
+
+	// Check if Favourites has data and process it
+	if len(ClientData.Favourites) > 0 {
+		fileInfos = append(fileInfos, processDirectories(ClientData.Favourites)...)
+	}
+
+	// Assign the processed fileInfos to the tree
 	clientDataTree["tree"] = fileInfos
 
-    // Write the response
-    json.NewEncoder(w).Encode(clientDataTree)
-
-
-
+	// Write the response
+	json.NewEncoder(w).Encode(clientDataTree)
 }
 
 func searchRadioHandler(w http.ResponseWriter, r *http.Request) {
@@ -836,39 +1181,34 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		// Manage history
 		clientID := r.URL.Query().Get("client_id")
 		if clientID != "" {
-			clientHistory, err := readData(clientID, "history")
+			ClientData, err := readData(clientID, "history")
 			if err != nil {
 				log.Println(err)
 			}
 			
 			// Check if 'playable' exists in the client history
-			for i, item := range clientHistory.History {
+			for i, item := range ClientData.History {
 				if item == playable {
 					// Remove the item from history
-					clientHistory.History = append(clientHistory.History[:i], clientHistory.History[i+1:]...)
+					ClientData.History = append(ClientData.History[:i], ClientData.History[i+1:]...)
 					break
 				}
 			}
 
-			clientHistory.History = append(clientHistory.History, playable)
+			ClientData.History = append(ClientData.History, playable)
 
 			// Limit the history to the last 10 items
-			if len(clientHistory.History) > 10 {
-				clientHistory.History = clientHistory.History[len(clientHistory.History)-10:]
+			if len(ClientData.History) > 10 {
+				ClientData.History = ClientData.History[len(ClientData.History)-10:]
 			}
 
-			clientDB := os.Getenv("CLIENT_DB")
-			if clientDB == "" {
-				clientDB = "/tmp/audioloader-db"
-			}
-
-			clientHistoryFile := filepath.Join(clientDB, fmt.Sprintf("%s.history.json", clientID))
+			ClientDataFile := filepath.Join(clientDB, fmt.Sprintf("%s.history.json", clientID))
 
 			// Validate the client ID and file path
 			re := regexp.MustCompile(`[^A-Za-z0-9_\-\.]`)
-			if clientID != "" && filepath.HasPrefix(clientHistoryFile, clientDB) && re.MatchString(clientHistoryFile) {
+			if clientID != "" && filepath.HasPrefix(ClientDataFile, clientDB) && re.MatchString(ClientDataFile) {
 				// Write the updated history back to the file
-				file, err := os.Create(clientHistoryFile)
+				file, err := os.Create(ClientDataFile)
 				if err != nil {
 					http.Error(w, "Unable to write file", http.StatusInternalServerError)
 					return
@@ -877,7 +1217,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 
 				// Write JSON data to file
 				encoder := json.NewEncoder(file)
-				if err := encoder.Encode(clientHistory); err != nil {
+				if err := encoder.Encode(ClientData); err != nil {
 					http.Error(w, "Failed to write JSON data", http.StatusInternalServerError)
 					return
 				}
@@ -969,7 +1309,6 @@ func processCurrentSong(currentsong map[string]interface{}) map[string]interface
 			currentsong[state] = true
 		}
 	}
-	log.Printf("currentsong title: %v", currentsong["title"])
 
 	// Set title and display titles
 
