@@ -259,7 +259,15 @@ type ClientData struct {
 	Favourites []string `json:"favourites,omitempty"`
 	RadioHistory []string `json:"radio_history,omitempty"`
 	BandcampHistory []string `json:"bandcamp_history,omitempty"`
+	Stations        map[string]StationData `json:"stations,omitempty"`
+}
 
+// StationData holds individual radio station info.
+type StationData struct {
+	URL        string `json:"url"`
+	StationUUID string `json:"stationuuid"`
+	Name       string `json:"name"`
+	Favicon    string `json:"favicon"`
 }
 
 // readData reads the client's data from a JSON file.
@@ -1128,6 +1136,9 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		if playable == "" {
 			playable = r.URL.Query().Get("url")
 		}
+		stationUUID := r.URL.Query().Get("stationuuid")
+		name := r.URL.Query().Get("name")
+		favicon := r.URL.Query().Get("favicon")
 		
 		// Check if the playable URL is a radio station
 		if r.URL.Query().Get("stationuuid") != "" && !strings.Contains(playable, "bandcamp.com") && !strings.Contains(playable, "youtube") && !strings.Contains(playable, "youtu.be") {
@@ -1207,6 +1218,49 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}			
 
+		}
+		if stationUUID != "" {
+			clientData, err := readData(clientID, "radio_history")
+			if err != nil {
+				clientData = ClientData{
+					RadioHistory: []string{},
+					Stations:     map[string]StationData{},
+				}
+			}
+			
+			// Ensure 'stations' exists in client data
+			if clientData.Stations == nil {
+				clientData.Stations = make(map[string]StationData)
+			}
+
+			// Update radio history
+			// Remove the stationUUID from the history if it exists
+			for i, uuid := range clientData.RadioHistory {
+				if uuid == stationUUID {
+					clientData.RadioHistory = append(clientData.RadioHistory[:i], clientData.RadioHistory[i+1:]...)
+					break
+				}
+			}
+
+			// Append the stationUUID to the history and trim history to last 10 entries
+			clientData.RadioHistory = append(clientData.RadioHistory, stationUUID)
+			if len(clientData.RadioHistory) > 10 {
+				clientData.RadioHistory = clientData.RadioHistory[len(clientData.RadioHistory)-10:]
+			}
+
+			// Update stations information
+			clientData.Stations[stationUUID] = StationData{
+				URL:        playable,
+				StationUUID: stationUUID,
+				Name:       name,
+				Favicon:    favicon,
+			}
+			// Write the updated data back to the file
+			if err := writeData(clientID, "radio_history", clientData); err != nil {
+				log.Printf("Failed to write radio history for %s: %v", clientID, err)
+				http.Error(w, "Failed to update radio history", http.StatusInternalServerError)
+				return
+			}
 		}
 
 
