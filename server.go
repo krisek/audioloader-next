@@ -26,7 +26,6 @@ import (
 
 	"os/exec"
 	"math/rand"
-	"sync"
 
 )
 
@@ -62,29 +61,12 @@ var ctx = context.Background()
 
 var (
 	redisClient *redis.Client
-	bandcamp_enabled = true
-	mpdClient *MPDClientWrapper
-	mpdClientPoll *MPDClientWrapper
-	clientDB string
+	bandcampEnabled, _ = strconv.ParseBool(getEnv("BANDCAMP_ENABLED", "true"))
+	clientDB = getEnv("CLIENT_DB", "/tmp/audioloader-db")
+	defaultStream = getEnv("DEFAULT_STREAM", "http://" + os.Getenv("HOST") + ":8000/audio.ogg")
+	mpdHost = getEnv("MPD_HOST", "localhost")
+	mpdPort = getEnv("MPD_PORT", "6600")
 )
-
-
-// Initialize appConfig using environment variables, defaulting to localhost if not set
-var appConfig = struct {
-    MPDHost string
-}{
-    MPDHost: getEnv("MPD_HOST", "localhost"),
-}
-
-
-func init() {
-	clientDB = os.Getenv("CLIENT_DB")
-	if clientDB == "" {
-		clientDB = "/tmp/audioloader-db"
-	}
-}
-
-
 
 // Helper function to get environment variables with a default value
 func getEnv(key, defaultVal string) string {
@@ -94,78 +76,23 @@ func getEnv(key, defaultVal string) string {
     return defaultVal
 }
 
-type MPDClientWrapper struct {
-    client *mpd.Client
-	mu     sync.Mutex
-}
-
-
-func NewMPDClientWrapper(address string) (*MPDClientWrapper, error) {
+// getMPDClient creates a new MPD client connection using the provided host and port.
+func getMPDClient(host string, port string) (*mpd.Client, error) {
+    // Build the address string in the format "host:port"
+    if port == "" {
+		port = mpdPort
+	}
+	address := fmt.Sprintf("%s:%s", host, port)
+    
+    // Dial the MPD server and return the client
     client, err := mpd.Dial("tcp", address)
     if err != nil {
+        log.Printf("Failed to connect to MPD server at %s: %v", address, err)
         return nil, err
     }
-    return &MPDClientWrapper{client: client}, nil
+    
+    return client, nil
 }
-
-func (w *MPDClientWrapper) Reconnect(address string) error {
-    backoff := time.Second
-    for {
-        log.Println("Attempting to reconnect to MPD...")
-
-        client, err := mpd.Dial("tcp", address)
-        if err == nil {
-            w.mu.Lock()
-            w.client = client
-            w.mu.Unlock()
-            log.Println("Reconnected to MPD")
-            return nil
-        }
-
-        log.Printf("Reconnect failed: %v. Retrying in %s...\n", err, backoff)
-        time.Sleep(backoff)
-        backoff *= 2
-        if backoff > time.Minute {
-            backoff = time.Minute
-        }
-    }
-}
-
-func (w *MPDClientWrapper) Client() *mpd.Client {
-    w.mu.Lock()
-    defer w.mu.Unlock()
-    return w.client
-}
-
-func (w *MPDClientWrapper) EnsureConnection(address string) {
-    go func() {
-        for {
-            w.mu.Lock()
-            client := w.client
-            w.mu.Unlock()
-
-            if client == nil {
-                log.Println("MPD client is nil. Attempting to reconnect...")
-                if err := w.Reconnect(address); err != nil {
-                    log.Printf("Failed to reconnect to MPD: %v", err)
-                }
-                continue
-            }
-
-            err := client.Ping()
-            if err != nil {
-                log.Println("MPD connection lost. Reconnecting...")
-                if err := w.Reconnect(address); err != nil {
-                    log.Printf("Failed to reconnect to MPD: %v", err)
-                }
-            }
-            
-            time.Sleep(10 * time.Second) // Adjust the interval as necessary
-        }
-    }()
-}
-
-
 
 func main() {
 
@@ -174,16 +101,6 @@ func main() {
 		Addr: "localhost:6379",
 		DB:   0,
 	})
-
-	// Initialize MPD client
-	var err error
-	mpdClient, err = NewMPDClientWrapper("localhost:6600")
-	if err != nil {
-		log.Fatalf("Failed to connect to MPD: %v", err)
-	}
-	defer mpdClient.Client().Close()
-
-	mpdClient.EnsureConnection("localhost:6600")
 
 	// Initialize Cron scheduler
 	c := cron.New()
@@ -268,8 +185,10 @@ func coverHandler(w http.ResponseWriter, r *http.Request) {
 
 	// If the cover is not found, search the MPD directory
 	if cover == "vinyl.webp" || cover == "" {
+		mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
+		dirContent, err := mpdClient.ListFiles(directory)
+		mpdClient.Close()
 
-		dirContent, err := mpdClient.Client().ListFiles(directory)
 		if err != nil {
 			log.Printf("Error listing files: %v", err)
 			http.Error(w, "Failed to list files", http.StatusInternalServerError)
@@ -322,10 +241,7 @@ func coverHandler(w http.ResponseWriter, r *http.Request) {
 		if cover == "vinyl.webp" {
 			coverPath = "./static/assets/vinyl.webp"
 		} else {
-			libraryPath := os.Getenv("LIBRARY_PATH")
-			if libraryPath == "" {
-				libraryPath = "/home/kris/Music/opus"
-			}
+			libraryPath := getEnv("LIBRARY_PATH", "/home/kris/Music/opus")
 			coverPath = filepath.Join(libraryPath, directory, cover)		}
 		if _, err := os.Stat(coverPath); os.IsNotExist(err) {
 			log.Printf("Cover not found, falling back to default: %v", coverPath)
@@ -404,20 +320,14 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
 	var err error
 	
 	log.Printf("Starting to poll")
+	mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
 
-	mpdClientPoll, err = NewMPDClientWrapper("localhost:6600")
-	if err != nil {
-		log.Fatalf("Failed to connect to MPD: %v", err)
-	}
-	defer mpdClientPoll.Client().Close()
-
-	mpdClientPoll.EnsureConnection("localhost:6600")
 
     // Wait for MPD events with a timeout
-    timeout := 180 * time.Second
+    timeout := 60 * time.Second
     done := make(chan bool)
     go func() {
-        result, err := mpdClientPoll.Client().Idle("playlist", "player")
+        result, err := mpdClient.Idle("playlist", "player")
         if err != nil {
             log.Printf("Failed to wait for MPD events: %v", err)
         } else {
@@ -425,8 +335,6 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
 		}
         done <- true
     }()
-
-	log.Printf("Back from poll")
 
     select {
     case <-done:
@@ -436,25 +344,25 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
         // Timeout occurred
         log.Printf("Timeout waiting for MPD events")
     }
-
+	mpdClient.Close()
+	mpdClient, _ = getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
     // Get current song and status
-    currentsong, err := mpdClient.Client().CurrentSong()
+    currentsong, err := mpdClient.CurrentSong()
 
 
     if err != nil {
         // http.Error(w, "Failed to get current song", http.StatusInternalServerError)
         log.Printf("Failed to get current song in pollCurrentSongHandler: %v", err)
     }
-	log.Printf("CurrentSong: %v", currentsong)
+	// log.Printf("CurrentSong: %v", currentsong)
     
-    status, err := mpdClient.Client().Status()
+    status, err := mpdClient.Status()
     if err != nil {
         // http.Error(w, "Failed to get status", http.StatusInternalServerError)
         log.Printf("Failed to get status in pollCurrentSongHandler: %v", err)
     }
 
-
-	log.Printf("Status: %v", status)
+	// log.Printf("Status: %v", status)
 
     // Convert mpd.Attrs to map[string]interface{}
     currentsongMap := make(map[string]interface{})
@@ -467,15 +375,15 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
 
     // Add additional information
     currentsongMap["players"] = getActivePlayers()
-    currentsongMap["bandcamp_enabled"] = bandcamp_enabled
-    currentsongMap["default_stream"] = "http://" + os.Getenv("hostname") + ":8000/audio.ogg"
-
+    currentsongMap["bandcamp_enabled"] = bandcampEnabled
+    currentsongMap["default_stream"] = defaultStream
+	
 	log.Printf("currentsongMap: %v", currentsongMap)
 
     // Process current song
     currentsongMap = processCurrentSong(currentsongMap)
 
-	log.Printf("currentsongMap g2: %v", currentsongMap)
+	// log.Printf("currentsongMap g2: %v", currentsongMap)
 
     // Convert map[string]interface{} back to mpd.Attrs
     processedSong := make(mpd.Attrs)
@@ -485,6 +393,7 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Data return: %v", processedSong)
 
+	mpdClient.Close()
     // Return the content as JSON
     w.Header().Set("Content-Type", "application/json")
 
@@ -549,8 +458,8 @@ func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
 	filter := r.URL.Query().Get("set_filter")
 	clientData := ClientData{Randomset: []string{}}
 	artists := make(map[string]bool)
-
-	albums, err := mpdClient.Client().List("album")
+	mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
+	albums, err := mpdClient.List("album")
 	if err != nil {
 		log.Printf("Error listing albums: %v\n", err)
 		http.Error(w, "failed to generate randomset", http.StatusInternalServerError)
@@ -565,7 +474,7 @@ func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
 		randomAlbums := randomChoice(albums, 12) // Get 12 random albums
 		
 		for _, album := range randomAlbums {
-			albumData, err := mpdClient.Client().Search("album", album)
+			albumData, err := mpdClient.Search("album", album)
 			if err != nil {
 				log.Printf("Error searching album %s: %v\n", album, err)
 				continue
@@ -615,7 +524,7 @@ func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
+	mpdClient.Close()
 	// Send OK response
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"result": "ok"}`))
@@ -820,14 +729,14 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
 	// Function to process the data for any string slice (History, Randomset, etc.)
 	processDirectories := func(directories []string) []FileInfo {
 		var fileInfos []FileInfo
-
+		mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
 		for _, directory := range directories {
 			log.Printf("processing %v", directory)
 			directoryStr := directory
 
 			// If it's not a root or HTTP directory
 			if directoryStr != "/" && !isHTTP(directoryStr) {
-				count, err := mpdClient.Client().Count("base", directoryStr)
+				count, err := mpdClient.Count("base", directoryStr)
 				if err != nil {
 					log.Printf("Could not get count for %s: %v\n", directoryStr, err)
 					continue
@@ -857,7 +766,7 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
 		for i, j := 0, len(fileInfos)-1; i < j; i, j = i+1, j-1 {
 			fileInfos[i], fileInfos[j] = fileInfos[j], fileInfos[i]
 		}
-
+		mpdClient.Close()
 		return fileInfos
 	}
 
@@ -886,8 +795,72 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(clientDataTree)
 }
 
+
+type RadioStation struct {
+    Name     string `json:"name"`
+    Favicon  string `json:"favicon"`
+    Bitrate  int    `json:"bitrate"`
+	UUID    string `json:"stationuuid"`
+	Url     string `json:"url"`
+}
+
+type Content struct {
+    Tree []RadioStation `json:"tree"`
+}
+
 func searchRadioHandler(w http.ResponseWriter, r *http.Request) {
-	// Implement search radio handler
+    content := Content{Tree: []RadioStation{}}
+    pattern := r.URL.Query().Get("pattern")
+    
+    if len(pattern) < 3 {
+        json.NewEncoder(w).Encode(content)
+        return
+    }
+
+    client := &http.Client{Timeout: 10 * time.Second}
+    url := fmt.Sprintf("https://de1.api.radio-browser.info/json/stations/search?name=%s&name_exact=false", pattern)
+    
+    req, err := http.NewRequest("GET", url, nil)
+    if err != nil {
+        log.Printf("Error creating request: %v", err)
+        http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+        return
+    }
+
+    resp, err := client.Do(req)
+    if err != nil {
+        log.Printf("Error making request to Radio Browser API: %v", err)
+        http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+        return
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        log.Printf("API responded with status code: %v", resp.StatusCode)
+        http.Error(w, "Failed to fetch radio stations", http.StatusBadRequest)
+        return
+    }
+	log.Printf("radio stations: %s", resp.Body)
+    var stations []RadioStation
+    if err := json.NewDecoder(resp.Body).Decode(&stations); err != nil {
+        log.Printf("Error decoding response: %v", err)
+        http.Error(w, "Failed to process response", http.StatusInternalServerError)
+        return
+    }
+
+    // Filter and modify stations as necessary
+    for _, station := range stations {
+        if station.Name != "" && (station.Bitrate > 60 || station.Bitrate == 0) {
+            if station.Favicon == "" {
+                station.Favicon = "assets/radio.png"
+            }
+            content.Tree = append(content.Tree, station)
+        }
+    }
+
+    // Return the content as JSON
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(content)
 }
 
 func searchBandcampHandler(w http.ResponseWriter, r *http.Request) {
@@ -902,37 +875,40 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
     var content map[string]interface{} = make(map[string]interface{})
     var err error
 	log.Printf("mpdProxyHandler url: %v", r.URL.Path)
-    switch r.URL.Path {
+    mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
+
+	switch r.URL.Path {
     case "/play":
-        err = mpdClient.Client().Play(-1)
+        err = mpdClient.Play(-1)
         content["message"] = "Playing"
     case "/pause":
-        err = mpdClient.Client().Pause(true)
+        err = mpdClient.Pause(true)
         content["message"] = "Paused"
     case "/playpause":
-        status, err := mpdClient.Client().Status()
+        status, err := mpdClient.Status()
         if err != nil {
             http.Error(w, "Failed to get status", http.StatusInternalServerError)
             return
         }
         if status["state"] == "pause" {
-            err = mpdClient.Client().Play(-1)
+            err = mpdClient.Play(-1)
             content["message"] = "Playing"
         } else {
-            err = mpdClient.Client().Pause(true)
+            err = mpdClient.Pause(true)
             content["message"] = "Paused"
         }
     case "/next":
-        err = mpdClient.Client().Next()
+        err = mpdClient.Next()
         content["message"] = "Next track"
     case "/prev":
-        err = mpdClient.Client().Previous()
+        err = mpdClient.Previous()
         content["message"] = "Previous track"
     case "/stop":
-        err = mpdClient.Client().Stop()
+        mpdClient.Stop()
+		mpdClient.Clear()
         content["message"] = "Stopped"
     case "/status":
-        status, err := mpdClient.Client().Status()
+        status, err := mpdClient.Status()
         if err != nil {
             http.Error(w, "Failed to get status", http.StatusInternalServerError)
             return
@@ -943,7 +919,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		if directory == "" {
 			directory = "."
 		}
-		files, err := mpdClient.Client().ListInfo(directory)
+		files, err := mpdClient.ListInfo(directory)
 		if err != nil {
 			http.Error(w, "Failed to list files", http.StatusInternalServerError)
 			return
@@ -954,7 +930,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		if directory == "" {
 			directory = "."
 		}
-		info, err := mpdClient.Client().ListInfo(directory)
+		info, err := mpdClient.ListInfo(directory)
 		if err != nil {
 			http.Error(w, "Failed to get lsinfo", http.StatusInternalServerError)
 			return
@@ -967,7 +943,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		if pattern == "" {
 			pattern = "ugar"
 		}
-		searchResult, err := mpdClient.Client().Search("any", pattern)
+		searchResult, err := mpdClient.Search("any", pattern)
 		if err != nil {
 			http.Error(w, "Failed to search", http.StatusInternalServerError)
 			return
@@ -1003,7 +979,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		// Add directories to fileInfos
 		for directory := range resultDirectories {
 
-			subDirCount, err := mpdClient.Client().Count("base", directory)
+			subDirCount, err := mpdClient.Count("base", directory)
 			log.Printf("subDirCount: %v", subDirCount)
 			if err != nil {
 				http.Error(w, "Failed to count", http.StatusInternalServerError)
@@ -1042,7 +1018,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		if directory == "." {
 			directory = "/"
 		}
-		listFiles, err := mpdClient.Client().ListInfo(directory)
+		listFiles, err := mpdClient.ListInfo(directory)
 		if err != nil {
 			log.Printf("%v", err)
 			http.Error(w, "Failed to list files", http.StatusInternalServerError)
@@ -1054,9 +1030,9 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		var count []string
 
 		if directory != "/" {
-			count, err = mpdClient.Client().Count("base", directory)
+			count, err = mpdClient.Count("base", directory)
 		} else {
-			count, err = mpdClient.Client().Count("modified-since", "0")
+			count, err = mpdClient.Count("modified-since", "0")
 		}
 		log.Printf("count: %v", count)
 	
@@ -1107,7 +1083,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			subDir := dir
 
-			subDirCount, err := mpdClient.Client().Count("base", dir)
+			subDirCount, err := mpdClient.Count("base", dir)
 			log.Printf("subDirCount: %v", subDirCount)
 			seconds, err := strconv.Atoi(subDirCount[1])
 			if err != nil {
@@ -1147,16 +1123,16 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		content["tree"] = fileInfos
 	
 	case "/addplay":
-		// var playables []string
+		var playables []string
 		playable := r.URL.Query().Get("directory")
 		if playable == "" {
 			playable = r.URL.Query().Get("url")
 		}
-
+		
 		// Check if the playable URL is a radio station
 		if r.URL.Query().Get("stationuuid") != "" && !strings.Contains(playable, "bandcamp.com") && !strings.Contains(playable, "youtube") && !strings.Contains(playable, "youtu.be") {
 			// Placeholder for pyradios implementation
-			stationURL := getRadioStationURL(r.URL.Query().Get("stationuuid"))
+			stationURL := r.URL.Query().Get("url")
 			playable = stationURL
 		}
 		
@@ -1172,15 +1148,23 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 			playable = string(output)
 		}
 		
-		log.Printf("%v", playable)
+		log.Printf("Playable: %v", playable)
 		
-		mpdClient.Client().Consume(true)
-		mpdClient.Client().Add(playable)
-		mpdClient.Client().Play(0)
+		mpdClient.Consume(true)
+		
+		if r.URL.Query().Get("directory") != "" || len(playables) > 0{
+			mpdClient.Add("signal.mp3")
+		}
+		
+		if playable != "" {
+			mpdClient.Add(playable)
+		}
+		
+		mpdClient.Play(0)
 	
 		// Manage history
 		clientID := r.URL.Query().Get("client_id")
-		if clientID != "" {
+		if r.URL.Query().Get("directory") != "" && clientID != "" {
 			ClientData, err := readData(clientID, "history")
 			if err != nil {
 				log.Println(err)
@@ -1223,7 +1207,6 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}			
 
-
 		}
 
 
@@ -1237,7 +1220,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
         http.Error(w, fmt.Sprintf("Failed to execute command: %v", err), http.StatusInternalServerError)
         return
     }
-
+	mpdClient.Close()
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(content)
 }
@@ -1373,16 +1356,16 @@ func processCurrentSong(currentsong map[string]interface{}) map[string]interface
 func currentSongHandler(w http.ResponseWriter, r *http.Request) {
 	// Connect to MPD
 
-
+	mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
 	// Get current song and status
-	currentsong, err := mpdClient.Client().CurrentSong()
+	currentsong, err := mpdClient.CurrentSong()
 	if err != nil {
 		http.Error(w, "Failed to get current song", http.StatusInternalServerError)
 		log.Printf("Failed to get current song: %v", err)
 		return
 	}
 
-	status, err := mpdClient.Client().Status()
+	status, err := mpdClient.Status()
 	if err != nil {
 		http.Error(w, "Failed to get status", http.StatusInternalServerError)
 		log.Printf("Failed to get status: %v", err)
@@ -1400,8 +1383,8 @@ func currentSongHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Add additional information
 	currentsongMap["players"] = getActivePlayers()
-	currentsongMap["bandcamp_enabled"] = bandcamp_enabled
-	currentsongMap["default_stream"] = "http://" + os.Getenv("hostname") + ":8000/audio.ogg"
+	currentsongMap["bandcamp_enabled"] = bandcampEnabled
+	currentsongMap["default_stream"] = defaultStream
 
 	// Process current song
 	currentsongMap = processCurrentSong(currentsongMap)
@@ -1411,7 +1394,7 @@ func currentSongHandler(w http.ResponseWriter, r *http.Request) {
 	for k, v := range currentsongMap {
 		processedSong[k] = fmt.Sprintf("%v", v)
 	}
-
+	mpdClient.Close()
 	// Return the content as JSON
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(processedSong)
@@ -1425,11 +1408,11 @@ func countHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("Directory: %v", directory)
 
-
+	mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
 	// Get the count of the specified directory
 
-	count, err := mpdClient.Client().Count("base", directory)
-
+	count, err := mpdClient.Count("base", directory)
+	mpdClient.Close()
 	if err != nil {
 		http.Error(w, "Failed to get count", http.StatusInternalServerError)
 		log.Printf("Failed to get count: %v", err)
@@ -1460,9 +1443,9 @@ func toggleOutputHandler(w http.ResponseWriter, r *http.Request) {
 	outputID := r.URL.Query().Get("output")
 	log.Printf("outputID: %v", outputID)
 
-
+	mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
 	// Get the current outputs
-	outputs, err := mpdClient.Client().ListOutputs()
+	outputs, err := mpdClient.ListOutputs()
 	log.Printf("outputs: %v", outputs)
 
 	if err != nil {
@@ -1476,9 +1459,9 @@ func toggleOutputHandler(w http.ResponseWriter, r *http.Request) {
 		if output["outputid"] == outputID {
 			outputInt, err := strconv.Atoi(outputID)
 			if output["outputenabled"] == "1" {
-				err = mpdClient.Client().DisableOutput(outputInt)
+				err = mpdClient.DisableOutput(outputInt)
 			} else {
-				err = mpdClient.Client().EnableOutput(outputInt)
+				err = mpdClient.EnableOutput(outputInt)
 			}
 			if err != nil {
 				http.Error(w, "Failed to toggle output", http.StatusInternalServerError)
@@ -1490,12 +1473,14 @@ func toggleOutputHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get the updated outputs
-	outputs, err = mpdClient.Client().ListOutputs()
+	outputs, err = mpdClient.ListOutputs()
 	if err != nil {
 		http.Error(w, "Failed to get outputs", http.StatusInternalServerError)
 		log.Printf("Failed to get outputs: %v", err)
 		return
 	}
+
+	mpdClient.Close()
 
 	// Return the outputs as JSON
 	w.Header().Set("Content-Type", "application/json")
