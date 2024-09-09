@@ -27,6 +27,9 @@ import (
 	"os/exec"
 	"math/rand"
 
+	"github.com/huin/goupnp"
+	"github.com/huin/goupnp/dcps/av1"
+	"net/url"
 )
 
 
@@ -330,7 +333,6 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Starting to poll")
 	mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
 
-
     // Wait for MPD events with a timeout
     timeout := 60 * time.Second
     done := make(chan bool)
@@ -352,25 +354,20 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
         // Timeout occurred
         log.Printf("Timeout waiting for MPD events")
     }
+
 	mpdClient.Close()
 	mpdClient, _ = getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
+
     // Get current song and status
     currentsong, err := mpdClient.CurrentSong()
-
-
     if err != nil {
-        // http.Error(w, "Failed to get current song", http.StatusInternalServerError)
         log.Printf("Failed to get current song in pollCurrentSongHandler: %v", err)
     }
-	// log.Printf("CurrentSong: %v", currentsong)
     
     status, err := mpdClient.Status()
     if err != nil {
-        // http.Error(w, "Failed to get status", http.StatusInternalServerError)
         log.Printf("Failed to get status in pollCurrentSongHandler: %v", err)
     }
-
-	// log.Printf("Status: %v", status)
 
     // Convert mpd.Attrs to map[string]interface{}
     currentsongMap := make(map[string]interface{})
@@ -382,7 +379,7 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
     }
 
     // Add additional information
-    currentsongMap["players"] = getActivePlayers()
+    currentsongMap["players"] = getActivePlayers() // Preserve the structure of players
     currentsongMap["bandcamp_enabled"] = bandcampEnabled
     currentsongMap["default_stream"] = defaultStream
 	
@@ -391,39 +388,165 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
     // Process current song
     currentsongMap = processCurrentSong(currentsongMap)
 
-	// log.Printf("currentsongMap g2: %v", currentsongMap)
-
-    // Convert map[string]interface{} back to mpd.Attrs
-    processedSong := make(mpd.Attrs)
-    for k, v := range currentsongMap {
-        processedSong[k] = fmt.Sprintf("%v", v)
-    }
-
-	log.Printf("Data return: %v", processedSong)
-
+    // Close MPD client connection
 	mpdClient.Close()
+
     // Return the content as JSON
     w.Header().Set("Content-Type", "application/json")
 
-	encode_err := json.NewEncoder(w).Encode(processedSong)
-	if encode_err != nil {
-		// Log the error
-		log.Printf("Error encoding JSON response: %v", encode_err)
-		
+	// Directly encode the final currentsongMap to JSON
+	if err := json.NewEncoder(w).Encode(currentsongMap); err != nil {
+		log.Printf("Error encoding JSON response: %v", err)
+		// If encoding fails, send an empty JSON object as a fallback
 		emptyResponse := map[string]interface{}{}
 		json.NewEncoder(w).Encode(emptyResponse)
 	}
-
-
 }
+
 
 func kodiHandler(w http.ResponseWriter, r *http.Request) {
 	// Implement Kodi handler
 }
 
+// Define constants or use environment/config variables as needed
+var defaultStreamURL = "http://localhost:8000/audio.ogg"
+
+// upnpHandler manages both UPnP and MPD control
 func upnpHandler(w http.ResponseWriter, r *http.Request) {
-	// Implement UPnP handler
+	server := r.URL.Query().Get("server")
+	if server == "" || server == "undefined" {
+		json.NewEncoder(w).Encode(map[string]string{"result": "no server given"})
+		return
+	}
+
+	log.Println("Server:", server)
+	action := r.URL.Query().Get("action")
+	if action == "" {
+		action = "Player.Stop"
+	}
+	streamURL := r.URL.Query().Get("stream")
+	if streamURL == "" {
+		streamURL = defaultStreamURL
+	}
+
+	if strings.Contains(server, "upnp") || strings.Contains(server, "xml") {
+		// Handle UPnP device actions
+		err := handleUPnP(server, action, streamURL)
+		if err != nil {
+			log.Printf("UPnP Error: %v", err)
+			json.NewEncoder(w).Encode(map[string]string{"result": "load failed"})
+			return
+		}
+	} else if strings.Contains(server, "_6600") {
+		// Handle MPD device actions
+		err := handleMPD(server, action, streamURL)
+		if err != nil {
+			log.Printf("MPD Error: %v", err)
+			json.NewEncoder(w).Encode(map[string]string{"result": "load failed"})
+			return
+		}
+	} else {
+		// No matching device type
+		json.NewEncoder(w).Encode(map[string]string{"result": "unsupported server"})
+		return
+	}
+
+	// Success response
+	json.NewEncoder(w).Encode(map[string]string{"result": "loaded"})
 }
+
+// handleUPnP controls UPnP devices using the AVTransport service
+func handleUPnP(server, action, streamURL string) error {
+	// Parse the server URL
+	parsedURL, err := url.Parse(server)
+	if err != nil {
+		return fmt.Errorf("failed to parse server URL: %v", err)
+	}
+
+	// Discover and connect to the UPnP device
+	device, err := goupnp.DeviceByURL(parsedURL)
+	if err != nil {
+		return fmt.Errorf("failed to discover UPnP device: %v", err)
+	}
+
+	// Parse the device's URLBase into *url.URL
+	deviceURL, err := url.Parse(device.URLBase.String())
+	if err != nil {
+		return fmt.Errorf("failed to parse device URLBase: %v", err)
+	}
+
+	// Access the AVTransport service
+	transport, err := av1.NewAVTransport1ClientsByURL(deviceURL)
+	if err != nil || len(transport) == 0 {
+		return fmt.Errorf("failed to connect to AVTransport service: %v", err)
+	}
+
+	client := transport[0] // Assuming there is at least one transport client
+
+	// Perform action based on the provided action string
+	switch action {
+	case "Player.Open":
+		// Set the URI for playback and start playing
+		err := client.SetAVTransportURI(0, streamURL, "Audioloader")
+		if err != nil {
+			return fmt.Errorf("failed to set AVTransport URI: %v", err)
+		}
+		err = client.Play(0, "1")
+		if err != nil {
+			return fmt.Errorf("failed to start playback: %v", err)
+		}
+	default:
+		// Stop playback
+		err := client.Stop(0)
+		if err != nil {
+			return fmt.Errorf("failed to stop playback: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// handleMPD controls MPD servers
+func handleMPD(server, action, streamURL string) error {
+	// Parse MPD host and port
+	mpdHostPort := strings.Split(server, "_")
+	if len(mpdHostPort) != 2 {
+		return fmt.Errorf("invalid MPD server format")
+	}
+	mpdHost := mpdHostPort[0]
+	mpdPort := mpdHostPort[1]
+
+	// Get MPD client
+	mpdClient, err := getMPDClient(mpdHost, mpdPort)
+	if err != nil {
+		return fmt.Errorf("failed to connect to MPD: %v", err)
+	}
+	defer mpdClient.Close()
+
+	switch action {
+	case "Player.Open":
+		err = mpdClient.Clear()
+		if err != nil {
+			return fmt.Errorf("failed to clear playlist: %v", err)
+		}
+		err = mpdClient.Add(streamURL)
+		if err != nil {
+			return fmt.Errorf("failed to add stream to playlist: %v", err)
+		}
+		err = mpdClient.Play(-1)
+		if err != nil {
+			return fmt.Errorf("failed to start playback: %v", err)
+		}
+	default:
+		err = mpdClient.Stop()
+		if err != nil {
+			return fmt.Errorf("failed to stop playback: %v", err)
+		}
+	}
+
+	return nil
+}
+
 
 func randomChoice(albums []string, k int) []string {
 	n := len(albums)
@@ -630,8 +753,13 @@ func remove(slice []string, item string) []string {
     return slice
 }
 
+
+// ActivePlayersHandler handles requests to retrieve active players
 func activePlayersHandler(w http.ResponseWriter, r *http.Request) {
-	// Implement active players handler
+	players := getActivePlayers()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(players)
 }
 
 
@@ -1171,7 +1299,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 			mpdClient.Add(playable)
 		}
 		
-		mpdClient.Play(0)
+		mpdClient.Play(-1)
 	
 		// Manage history
 		clientID := r.URL.Query().Get("client_id")
@@ -1409,8 +1537,8 @@ func processCurrentSong(currentsong map[string]interface{}) map[string]interface
 
 func currentSongHandler(w http.ResponseWriter, r *http.Request) {
 	// Connect to MPD
-
 	mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
+
 	// Get current song and status
 	currentsong, err := mpdClient.CurrentSong()
 	if err != nil {
@@ -1435,7 +1563,7 @@ func currentSongHandler(w http.ResponseWriter, r *http.Request) {
 		currentsongMap[k] = v
 	}
 
-	// Add additional information
+	// Add additional information (players, bandcamp_enabled, default_stream)
 	currentsongMap["players"] = getActivePlayers()
 	currentsongMap["bandcamp_enabled"] = bandcampEnabled
 	currentsongMap["default_stream"] = defaultStream
@@ -1443,16 +1571,17 @@ func currentSongHandler(w http.ResponseWriter, r *http.Request) {
 	// Process current song
 	currentsongMap = processCurrentSong(currentsongMap)
 
-	// Convert map[string]interface{} back to mpd.Attrs
-	processedSong := make(mpd.Attrs)
-	for k, v := range currentsongMap {
-		processedSong[k] = fmt.Sprintf("%v", v)
-	}
+	// Instead of converting to mpd.Attrs (which flattens the map), just encode the JSON directly
 	mpdClient.Close()
+
 	// Return the content as JSON
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(processedSong)
+	if err := json.NewEncoder(w).Encode(currentsongMap); err != nil {
+		http.Error(w, "Failed to encode JSON", http.StatusInternalServerError)
+		log.Printf("Failed to encode JSON: %v", err)
+	}
 }
+
 
 func countHandler(w http.ResponseWriter, r *http.Request) {
 	// Get the directory from the request
