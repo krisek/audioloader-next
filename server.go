@@ -30,6 +30,10 @@ import (
 	"github.com/huin/goupnp"
 	"github.com/huin/goupnp/dcps/av1"
 	"net/url"
+
+	"bytes"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
 
@@ -65,7 +69,7 @@ var ctx = context.Background()
 var (
 	redisClient *redis.Client
 	bandcampEnabled, _ = strconv.ParseBool(getEnv("BANDCAMP_ENABLED", "true"))
-	clientDB = getEnv("CLIENT_DB", "/tmp/audioloader-db")
+	clientDB = getEnv("CLIENT_DB", getEnv("HOME", "/tmp") + "/Music/audioloader-db")
 	defaultStream = getEnv("DEFAULT_STREAM", "http://" + os.Getenv("HOST") + ":8000/audio.ogg")
 	mpdHost = getEnv("MPD_HOST", "localhost")
 	mpdPort = getEnv("MPD_PORT", "6600")
@@ -114,7 +118,6 @@ func main() {
 
 	// Set up HTTP routes
 	http.HandleFunc("/cover", coverHandler)
-	http.HandleFunc("/poll_currentsong", pollCurrentSongHandler)
 	http.HandleFunc("/kodi", kodiHandler)
 	http.HandleFunc("/upnp", upnpHandler)
 	http.HandleFunc("/generate_randomset", generateRandomSetHandler)
@@ -141,6 +144,7 @@ func main() {
 	http.HandleFunc("/prev", mpdProxyHandler)
 	http.HandleFunc("/stop", mpdProxyHandler)
 	http.HandleFunc("/status", mpdProxyHandler)
+	http.HandleFunc("/poll_currentsong", pollCurrentSongHandler)
 	http.HandleFunc("/currentsong", currentSongHandler)
 	http.HandleFunc("/count", countHandler)
 	http.HandleFunc("/toggleoutput", toggleOutputHandler)
@@ -263,6 +267,7 @@ type ClientData struct {
 	RadioHistory []string `json:"radio_history,omitempty"`
 	BandcampHistory []string `json:"bandcamp_history,omitempty"`
 	Stations        map[string]StationData `json:"stations,omitempty"`
+	Links        map[string]LinkData `json:"links,omitempty"`
 }
 
 // StationData holds individual radio station info.
@@ -273,10 +278,16 @@ type StationData struct {
 	Favicon    string `json:"favicon"`
 }
 
-// readData reads the client's data from a JSON file.
-// readData reads client data from a JSON file.
+// LinkData holds individual bandcamp album info.
+type LinkData struct {
+	URL        string `json:"url"`
+	Title       string `json:"title"`
+	Favicon    string `json:"favicon"`
+	Artist    string `json:"artist"`
+	Date    string `json:"date"`
+}
 
-// readData reads client data from a JSON file and returns a ClientData struct.
+// readData reads the client's data from a JSON file.
 // readData reads client data from a JSON file and returns a ClientData struct.
 func readData(clientID string, dataType string) (ClientData, error) {
 	// Construct the file path
@@ -300,7 +311,7 @@ func readData(clientID string, dataType string) (ClientData, error) {
 	}
 
 	// Log the data as a string for debugging
-	log.Printf("readData - data read: %s", string(data))
+	// log.Printf("readData - data read: %s", string(data))
 
 	// Unmarshal JSON into ClientData struct
 	var clientdata ClientData
@@ -325,82 +336,6 @@ func getRadioStationURL(stationUUID string) string {
 	// Placeholder for pyradios implementation
 	// Replace this with the actual implementation later
 	return ""
-}
-
-func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
-	var err error
-	
-	log.Printf("Starting to poll")
-	mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
-
-    // Wait for MPD events with a timeout
-    timeout := 60 * time.Second
-    done := make(chan bool)
-    go func() {
-        result, err := mpdClient.Idle("playlist", "player")
-        if err != nil {
-            log.Printf("Failed to wait for MPD events: %v", err)
-        } else {
-			log.Printf("%s", result)
-		}
-        done <- true
-    }()
-
-    select {
-    case <-done:
-        // MPD event received
-		log.Printf("Something happened")
-    case <-time.After(timeout):
-        // Timeout occurred
-        log.Printf("Timeout waiting for MPD events")
-    }
-
-	mpdClient.Close()
-	mpdClient, _ = getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
-
-    // Get current song and status
-    currentsong, err := mpdClient.CurrentSong()
-    if err != nil {
-        log.Printf("Failed to get current song in pollCurrentSongHandler: %v", err)
-    }
-    
-    status, err := mpdClient.Status()
-    if err != nil {
-        log.Printf("Failed to get status in pollCurrentSongHandler: %v", err)
-    }
-
-    // Convert mpd.Attrs to map[string]interface{}
-    currentsongMap := make(map[string]interface{})
-    for k, v := range currentsong {
-        currentsongMap[k] = v
-    }
-    for k, v := range status {
-        currentsongMap[k] = v
-    }
-
-    // Add additional information
-    currentsongMap["players"] = getActivePlayers() // Preserve the structure of players
-    currentsongMap["bandcamp_enabled"] = bandcampEnabled
-    currentsongMap["default_stream"] = defaultStream
-	
-	log.Printf("currentsongMap: %v", currentsongMap)
-
-    // Process current song
-    currentsongMap = processCurrentSong(currentsongMap)
-
-    // Close MPD client connection
-	mpdClient.Close()
-
-    // Return the content as JSON
-    w.Header().Set("Content-Type", "application/json")
-
-	// Directly encode the final currentsongMap to JSON
-	if err := json.NewEncoder(w).Encode(currentsongMap); err != nil {
-		log.Printf("Error encoding JSON response: %v", err)
-		// If encoding fails, send an empty JSON object as a fallback
-		emptyResponse := map[string]interface{}{}
-		json.NewEncoder(w).Encode(emptyResponse)
-	}
 }
 
 
@@ -663,7 +598,7 @@ func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-// WriteData writes client data to a JSON file.
+// WriteData writes client data to a formatted JSON file.
 func writeData(clientID, dataType string, clientData ClientData) error {
     clientDataFile := filepath.Join(clientDB, fmt.Sprintf("%s.%s.json", clientID, dataType))
 
@@ -675,13 +610,15 @@ func writeData(clientID, dataType string, clientData ClientData) error {
         return fmt.Errorf("invalid characters in clientID")
     }
 
-    data, err := json.Marshal(clientData)
+    // Use json.MarshalIndent to write formatted (indented) JSON
+    data, err := json.MarshalIndent(clientData, "", "    ") // 4-space indentation
     if err != nil {
         return err
     }
 
     return os.WriteFile(clientDataFile, data, 0644)
 }
+
 
 // FavouritesHandler handles adding or removing favourites.
 func favouritesHandler(w http.ResponseWriter, r *http.Request) {
@@ -834,7 +771,15 @@ func formatPlaytime(playtime int) string {
     hours := playtime / 3600
     minutes := (playtime % 3600) / 60
     seconds := playtime % 60
-    return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+	var playhours string
+	if playtime < 3600 {
+		// Omit the hour if it's less than an hour
+		playhours = fmt.Sprintf("%v:%v", minutes, seconds)
+	} else {
+		// Include the hour
+		playhours = fmt.Sprintf("%v:%v:%v", hours, minutes, seconds)
+	}
+    return playhours
 }
 
 func capitalizeFirstLetter(s string) string {
@@ -999,12 +944,238 @@ func searchRadioHandler(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(content)
 }
 
+
+// searchBandcampHandler handles the search_bandcamp route
 func searchBandcampHandler(w http.ResponseWriter, r *http.Request) {
-	// Implement search bandcamp handler
+    pattern := r.URL.Query().Get("pattern")
+    
+    if len(pattern) < 20 || !(strings.Contains(pattern, "bandcamp.com/") || strings.Contains(pattern, "youtube") || strings.Contains(pattern, "youtu.be")) {
+        json.NewEncoder(w).Encode(map[string]interface{}{"tree": []interface{}{}})
+        return
+    }
+
+    content := map[string]interface{}{
+        "tree": []map[string]interface{}{},
+    }
+
+    // Check if the pattern is for Bandcamp
+    if strings.Contains(pattern, "bandcamp.com") {
+        albumList, err := handleBandcampSearch(pattern)
+        if err != nil {
+            log.Printf("Exception during Bandcamp search: %v", err)
+            json.NewEncoder(w).Encode(content)
+            return
+        }
+        content["tree"] = albumList
+    }
+
+    // Check if the pattern is for YouTube
+    if strings.Contains(pattern, "youtube") || strings.Contains(pattern, "youtu.be") {
+        youtubeLink := handleYouTubeSearch(pattern)
+        content["tree"] = append(content["tree"].([]map[string]interface{}), youtubeLink)
+    }
+
+    json.NewEncoder(w).Encode(content)
+}
+
+// handleBandcampSearch fetches album info for Bandcamp URLs
+func handleBandcampSearch(pattern string) ([]map[string]interface{}, error) {
+    log.Printf("Searching for Bandcamp album: %s", pattern)
+
+    albumInfo, err := getBandcampAlbumInfo(pattern)
+    if err != nil {
+        return nil, err
+    }
+
+    return []map[string]interface{}{albumInfo}, nil
+}
+
+// handleYouTubeSearch returns metadata for YouTube links
+func handleYouTubeSearch(pattern string) map[string]interface{} {
+    log.Printf("Returning YouTube link: %s", pattern)
+
+    return map[string]interface{}{
+        "url":    pattern,
+        "title":  pattern,
+        "year":   "",
+        "art":    "https://i.ytimg.com/vi_webp/VbChrk8Vs64/mqdefault.webp",
+        "artist": "",
+    }
+}
+
+// getBandcampAlbumInfo fetches metadata and track URLs from a Bandcamp album page
+func getBandcampAlbumInfo(url string) (map[string]interface{}, error) {
+    log.Printf("Fetching Bandcamp album info from: %s", url)
+
+    // Fetch the page content
+    resp, err := http.Get(url)
+    if err != nil || resp.StatusCode != 200 {
+        return nil, fmt.Errorf("failed to retrieve the Bandcamp page")
+    }
+    defer resp.Body.Close()
+
+    doc, err := goquery.NewDocumentFromReader(resp.Body)
+    if err != nil {
+        return nil, fmt.Errorf("failed to parse HTML")
+    }
+
+    // Extract album details
+    title, artist, releaseYear, coverArt := extractAlbumDetails(doc)
+
+    // Use yt-dlp to get track URLs
+    // trackURLs, err := getBandcampTrackURLs(url)
+    // if err != nil {
+    //    return nil, err
+    // }
+
+    // Construct the album data
+    albumData := map[string]interface{}{
+        "artist":       artist,
+        "title":        title,
+        "art":    coverArt,
+		"url": url,
+		"date": releaseYear,
+        // "tracks":       trackURLs,
+    }
+
+    return albumData, nil
+}
+
+// extractAlbumDetails extracts metadata from Bandcamp HTML
+func extractAlbumDetails(doc *goquery.Document) (string, string, string, string) {
+    // Extract title, artist, release year, and cover art
+    description := doc.Find("meta[name='description']").AttrOr("content", "")
+    title, artist, releaseYear := parseBandcampDescription(description)
+
+    coverArt := doc.Find("meta[property='og:image']").AttrOr("content", "")
+
+    return title, artist, releaseYear, coverArt
+}
+
+func getBandcampTrackURLs(url string) ([]string, error) {
+	// Define the yt-dlp command with options to extract URLs
+	log.Printf("Running yt-dlp -g %v", url)
+	cmd := exec.Command("yt-dlp", "-g", url)
+
+	// Capture the output
+	var out bytes.Buffer
+	cmd.Stdout = &out
+
+	// Run the command
+	err := cmd.Run()
+	if err != nil {
+		return nil, fmt.Errorf("yt-dlp command failed: %v", err)
+	}
+
+	// Split the output into lines (each URL is on a new line)
+	trackURLs := bytes.Split(out.Bytes(), []byte("\n"))
+
+	// Convert from [][]byte to []string, removing empty lines
+	var result []string
+	for _, track := range trackURLs {
+		if len(track) > 0 {
+			result = append(result, string(track))
+		}
+	}
+
+	return result, nil
+}
+
+// parseBandcampDescription extracts the album title, artist, and release year from the description.
+func parseBandcampDescription(description string) (string, string, string) {
+	// Trim any extra newlines and spaces
+	description = strings.TrimSpace(description)
+
+	// Regular expression to match title, artist, and release date
+	re := regexp.MustCompile(`^(.+?) by (.+?), released (\d{1,2} \w+ \d{4})`)
+	matches := re.FindStringSubmatch(description)
+
+	// Check if we found a match
+	if len(matches) > 0 {
+		title := strings.TrimSpace(matches[1])
+		artist := strings.TrimSpace(matches[2])
+		releaseDate := strings.TrimSpace(matches[3])
+
+		// Extract the release year from the release date
+		reYear := regexp.MustCompile(`\d{4}`)
+		yearMatch := reYear.FindString(releaseDate)
+
+		return title, artist, yearMatch
+	}
+
+	// Return empty strings if no match is found
+	return "", "", ""
 }
 
 func removeHistoryHandler(w http.ResponseWriter, r *http.Request) {
-	// Implement remove history handler
+    // Get the 'playable' parameter from the URL query or fall back to 'url'
+    playable := r.URL.Query().Get("directory")
+    if playable == "" {
+        playable = r.URL.Query().Get("url")
+    }
+	stationuuid := r.URL.Query().Get("stationuuid")
+    var history string
+
+    // Determine the history type (radio, bandcamp, or general history)
+    if stationuuid != "" {
+        history = "radio_history"
+    } else if strings.HasPrefix(playable, "http") {
+        history = "bandcamp_history"
+    } else {
+        history = "history"
+    }
+
+    clientID := r.URL.Query().Get("client_id")
+    if clientID == "" {
+        clientID = "guest"
+    }
+
+	log.Printf("need to deal with %v %v", history)
+
+    // Read the client history
+    clientHistory, err := readData(clientID, history)
+    if err != nil {
+        http.Error(w, "Failed to read client history", http.StatusInternalServerError)
+        log.Printf("Failed to read client history: %v", err)
+        return
+    }
+
+	log.Printf("read %v", clientHistory, playable)
+
+    // Remove the playable from the specific history type slice
+    if playable != "" {
+        if history == "radio_history" && len(clientHistory.RadioHistory) > 0 {
+			clientHistory.RadioHistory = removeItem(clientHistory.RadioHistory, stationuuid)
+			delete(clientHistory.Stations, stationuuid)
+		} else if history == "bandcamp_history" && len(clientHistory.BandcampHistory) > 0 {
+            clientHistory.BandcampHistory = removeItem(clientHistory.BandcampHistory, playable)
+        } else if history == "history" && len(clientHistory.History) > 0 {
+            clientHistory.History = removeItem(clientHistory.History, playable)
+        }
+    }
+
+    // Write back the updated history
+    err = writeData(clientID, history, clientHistory)
+    if err != nil {
+        http.Error(w, "Failed to write updated history", http.StatusInternalServerError)
+        log.Printf("Failed to write updated history: %v", err)
+        return
+    }
+
+    // Respond with success
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{"result": "ok"})
+}
+
+// Helper function to remove an item from a slice (returns a new slice)
+func removeItem(slice []string, item string) []string {
+	newSlice := []string{}
+	for _, v := range slice {
+		if v != item {
+			newSlice = append(newSlice, v)
+		}
+	}
+	return newSlice
 }
 
 func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
@@ -1230,8 +1401,16 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 			hours := fmt.Sprintf("%d", int(duration.Hours()))
 			minutes := fmt.Sprintf("%02d", int(duration.Minutes())%60)
 			secondsStr := fmt.Sprintf("%02d", int(duration.Seconds())%60)
-			playhours := fmt.Sprintf("%s:%s:%s", hours, minutes, secondsStr)
-	
+
+			var playhours string
+			if hours == "00" {
+				// Omit the hour if it's less than an hour
+				playhours = fmt.Sprintf("%s:%s", minutes, secondsStr)
+			} else {
+				// Include the hour
+				playhours = fmt.Sprintf("%s:%s:%s", hours, minutes, secondsStr)
+			}
+
 			fileInfo := FileInfo{
 				Directory:    subDir,
 				LastModified: name["last-modified"],
@@ -1264,6 +1443,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		if playable == "" {
 			playable = r.URL.Query().Get("url")
 		}
+		url := r.URL.Query().Get("url")
 		stationUUID := r.URL.Query().Get("stationuuid")
 		name := r.URL.Query().Get("name")
 		favicon := r.URL.Query().Get("favicon")
@@ -1277,14 +1457,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		
 		// Check if the playable URL is a YouTube video
 		if strings.Contains(playable, "youtube") || strings.Contains(playable, "youtu.be") || strings.Contains(playable, "bandcamp.com") {
-			// Use yt-dlp command line to get the video URL
-			cmd := exec.Command("yt-dlp", "-f", "bestaudio", "-g", playable)
-			output, err := cmd.CombinedOutput()
-			if err != nil {
-				log.Println(err)
-				return
-			}
-			playable = string(output)
+			playables, _ = getBandcampTrackURLs(playable)
 		}
 		
 		log.Printf("Playable: %v", playable)
@@ -1297,6 +1470,12 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 		
 		if playable != "" {
 			mpdClient.Add(playable)
+		}
+
+		if len(playables) > 0 {
+			for _, item := range(playables) {
+				mpdClient.Add(item)
+			}
 		}
 		
 		mpdClient.Play(-1)
@@ -1347,7 +1526,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 			}			
 
 		}
-		if stationUUID != "" {
+		if url != "" && ! (strings.Contains(playable, "youtube") || strings.Contains(playable, "youtu.be") || strings.Contains(playable, "bandcamp.com"))  && clientID != "" {
 			clientData, err := readData(clientID, "radio_history")
 			if err != nil {
 				clientData = ClientData{
@@ -1390,7 +1569,62 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if url != "" && (strings.Contains(playable, "youtube") || strings.Contains(playable, "youtu.be") || strings.Contains(playable, "bandcamp.com")) && clientID != ""  {
+			
 
+			clientData, err := readData(clientID, "bandcamp_history")
+			if err != nil {
+				clientData = ClientData{
+					BandcampHistory: []string{},
+					Links:     map[string]LinkData{},
+				}
+			}
+			
+			// Ensure 'stations' exists in client data
+			if clientData.Links == nil {
+				clientData.Links = make(map[string]LinkData)
+			}
+
+			for i, item := range clientData.BandcampHistory {
+				if item == playable {
+					clientData.BandcampHistory = append(clientData.BandcampHistory[:i], clientData.BandcampHistory[i+1:]...)
+					break
+				}
+			}
+
+			clientData.BandcampHistory = append(clientData.BandcampHistory, playable)
+			if len(clientData.BandcampHistory) > 10 {
+				clientData.BandcampHistory = clientData.BandcampHistory[len(clientData.BandcampHistory)-10:]
+			}
+
+
+			_, exists := clientData.Links[playable]
+			if exists {
+				fmt.Printf("Key '%s' exists with value in clientData.Links\n", playable)
+			} else {
+				// Update links information
+				albumInfo, _ := getBandcampAlbumInfo(playable)
+
+				clientData.Links[playable] = LinkData{
+					URL:        playable,
+					Favicon:    albumInfo["art"].(string),
+					Title:      albumInfo["title"].(string),
+					Date:       albumInfo["date"].(string),
+					Artist:     albumInfo["artist"].(string),
+				}
+			}
+
+
+
+
+
+			// Write the updated data back to the file
+			if err := writeData(clientID, "bandcamp_history", clientData); err != nil {
+				log.Printf("Failed to write bandcamp history for %s: %v", clientID, err)
+				http.Error(w, "Failed to update bandcamp history", http.StatusInternalServerError)
+				return
+			}
+		}
 
 	
 	default:
@@ -1476,13 +1710,10 @@ func processCurrentSong(currentsong map[string]interface{}) map[string]interface
 	}
 
 	// Set title and display titles
-
-	if currentsong["Title"] == "" {
-		if file, ok := currentsong["file"]; ok {
-			currentsong["title"] = file
-			currentsong["display_title"] = file
-			currentsong["display_title_top"] = ""
-		}
+	if currentsong["Title"] == "" || currentsong["Title"] == nil  {
+		currentsong["title"] = currentsong["file"]
+		currentsong["display_title"] = currentsong["file"]
+		currentsong["display_title_top"] = currentsong["Name"]
 	} else {
 		titleElements := []string{}
 		if track, ok := currentsong["Track"].(string); ok {
@@ -1534,6 +1765,79 @@ func processCurrentSong(currentsong map[string]interface{}) map[string]interface
 	return currentsong
 }
 
+
+func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
+	var err error
+	
+	mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
+
+    // Wait for MPD events with a timeout
+    timeout := 60 * time.Second
+    done := make(chan bool)
+    go func() {
+        result, err := mpdClient.Idle("playlist", "player")
+        if err == nil {
+            log.Printf("Failed to wait for MPD events: %v", err)
+        } else {
+			log.Printf("We've got something back: %v", result)
+		}
+        done <- true
+    }()
+
+    select {
+    case <-done:
+        // MPD event received
+		log.Printf("Something happened")
+    case <-time.After(timeout):
+        // Timeout occurred
+        log.Printf("Timeout waiting for MPD events")
+    }
+
+	mpdClient.Close()
+	mpdClient, _ = getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
+
+    // Get current song and status
+    currentsong, err := mpdClient.CurrentSong()
+    if err != nil {
+        log.Printf("Failed to get current song in pollCurrentSongHandler: %v", err)
+    }
+    
+    status, err := mpdClient.Status()
+    if err != nil {
+        log.Printf("Failed to get status in pollCurrentSongHandler: %v", err)
+    }
+
+    // Convert mpd.Attrs to map[string]interface{}
+    currentsongMap := make(map[string]interface{})
+    for k, v := range currentsong {
+        currentsongMap[k] = v
+    }
+    for k, v := range status {
+        currentsongMap[k] = v
+    }
+
+    // Add additional information
+    currentsongMap["players"] = getActivePlayers() // Preserve the structure of players
+    currentsongMap["bandcamp_enabled"] = bandcampEnabled
+    currentsongMap["default_stream"] = defaultStream
+	
+    // Process current song
+    currentsongMap = processCurrentSong(currentsongMap)
+
+	// Close MPD client connection
+	mpdClient.Close()
+
+    // Return the content as JSON
+    w.Header().Set("Content-Type", "application/json")
+
+	// Directly encode the final currentsongMap to JSON
+	if err := json.NewEncoder(w).Encode(currentsongMap); err != nil {
+		log.Printf("Error encoding JSON response: %v", err)
+		// If encoding fails, send an empty JSON object as a fallback
+		emptyResponse := map[string]interface{}{}
+		json.NewEncoder(w).Encode(emptyResponse)
+	}
+}
 
 func currentSongHandler(w http.ResponseWriter, r *http.Request) {
 	// Connect to MPD
@@ -1603,6 +1907,7 @@ func countHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("Count: %v", count)
 	// Calculate the play hours
+
 	seconds, err := strconv.Atoi(count[1])
 	duration := time.Duration(seconds) * time.Second
 	hours := int(duration.Hours())
