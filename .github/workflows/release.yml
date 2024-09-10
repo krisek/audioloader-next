@@ -2,7 +2,8 @@ on:
   push:
     tags:
       - 'v*'
-
+    branches:
+      - main
 name: Create Release
 
 jobs:
@@ -16,7 +17,7 @@ jobs:
         id: create_release
         uses: actions/create-release@v1
         env:
-          TOKEN: ${{ secrets.TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
         with:
           tag_name: ${{ github.ref }}
           release_name: Release ${{ github.ref }}
@@ -87,7 +88,7 @@ jobs:
         id: upload-release-asset-linux-amd64
         uses: actions/upload-release-asset@v1
         env:
-          TOKEN: ${{ secrets.TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
         with:
           upload_url: ${{ needs.once.outputs.upload_url }}
           asset_path: ./audioloader-linux-amd64-${{ github.ref_name }}.tar.gz
@@ -99,7 +100,7 @@ jobs:
         id: upload-release-asset-linux-arm7
         uses: actions/upload-release-asset@v1
         env:
-          TOKEN: ${{ secrets.TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
         with:
           upload_url: ${{ needs.once.outputs.upload_url }}
           asset_path: ./audioloader-linux-arm7-${{ github.ref_name }}.tar.gz
@@ -111,7 +112,7 @@ jobs:
         id: upload-release-asset-macos-amd64
         uses: actions/upload-release-asset@v1
         env:
-          TOKEN: ${{ secrets.TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
         with:
           upload_url: ${{ needs.once.outputs.upload_url }}
           asset_path: ./audioloader-macos-amd64-${{ github.ref_name }}.tar.gz
@@ -123,7 +124,7 @@ jobs:
         id: upload-release-asset-macos-arm64
         uses: actions/upload-release-asset@v1
         env:
-          TOKEN: ${{ secrets.TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
         with:
           upload_url: ${{ needs.once.outputs.upload_url }}
           asset_path: ./audioloader-macos-arm64-${{ github.ref_name }}.tar.gz
@@ -135,7 +136,7 @@ jobs:
         id: upload-release-asset-windows
         uses: actions/upload-release-asset@v1
         env:
-          TOKEN: ${{ secrets.TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
         with:
           upload_url: ${{ needs.once.outputs.upload_url }}
           asset_path: ./audioloader-windows-amd64-${{ github.ref_name }}.zip
@@ -147,7 +148,7 @@ jobs:
         id: upload-release-asset_windows_exe-amd64
         uses: actions/upload-release-asset@v1
         env:
-          TOKEN: ${{ secrets.TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
         with:
           upload_url: ${{ needs.once.outputs.upload_url }}
           asset_path: audioloader.exe
