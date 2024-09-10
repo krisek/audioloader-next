@@ -3,7 +3,7 @@ package main
 import (
     "encoding/json"
     "fmt"
-    "github.com/fhs/gompd/mpd"
+    "github.com/krisek/gompd/mpd"
     "github.com/go-redis/redis/v8"
     // "github.com/kkdai/youtube/v2"
     "github.com/robfig/cron/v3"
@@ -1543,10 +1543,10 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
                 }
             }
 
-            // Append the stationUUID to the history and trim history to last 10 entries
+            // Append the stationUUID to the history and trim history to last 12 entries
             clientData.RadioHistory = append(clientData.RadioHistory, stationUUID)
-            if len(clientData.RadioHistory) > 10 {
-                clientData.RadioHistory = clientData.RadioHistory[len(clientData.RadioHistory)-10:]
+            if len(clientData.RadioHistory) > 12 {
+                clientData.RadioHistory = clientData.RadioHistory[len(clientData.RadioHistory)-12:]
             }
 
             // Update stations information
@@ -1587,8 +1587,8 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
             }
 
             clientData.BandcampHistory = append(clientData.BandcampHistory, playable)
-            if len(clientData.BandcampHistory) > 10 {
-                clientData.BandcampHistory = clientData.BandcampHistory[len(clientData.BandcampHistory)-10:]
+            if len(clientData.BandcampHistory) > 36 {
+                clientData.BandcampHistory = clientData.BandcampHistory[len(clientData.BandcampHistory)-36:]
             }
 
 
