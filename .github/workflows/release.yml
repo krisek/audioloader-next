@@ -4,6 +4,7 @@ on:
       - 'v*'
     branches:
       - main
+
 name: Create Release
 
 jobs:
@@ -31,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, macos-13, ubuntu-latest, windows-latest]
+        os: [ubuntu-latest]
         arch: [amd64, arm64, arm7]
 
     steps:
@@ -43,7 +44,7 @@ jobs:
         with:
           go-version: '1.23'
 
-      - name: Build for Linux/macOS/Windows
+      - name: Build for Linux
         run: |
           if [[ "${{ matrix.arch }}" == "amd64" ]]; then
             GOARCH=amd64
@@ -52,38 +53,21 @@ jobs:
           elif [[ "${{ matrix.arch }}" == "arm7" ]]; then
             GOARCH=arm
           fi
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            CGO_ENABLED=0 GOARCH=$GOARCH go build -v -o audioloader server.go
-          elif [[ "${{ matrix.os }}" == "macos-latest" || "${{ matrix.os }}" == "macos-13" ]]; then
-            CGO_ENABLED=0 GOARCH=$GOARCH go build -v -o audioloader server.go
-          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            cmd /C "set CGO_ENABLED=0 && set GOARCH=$GOARCH && go build -v -o audioloader.exe server.go"
-          fi
+          CGO_ENABLED=0 GOARCH=$GOARCH go build -v -o audioloader server.go
 
-      - if: matrix.os == 'windows-latest' && matrix.arch == 'amd64'
-        name: create zip for windows amd64
-        uses: vimtor/action-zip@v1.1
-        with:
-          files: audioloader.exe
-          dest: audioloader-windows-amd64-${{ github.ref_name }}.zip
-
-      - if: matrix.os == 'ubuntu-latest' && matrix.arch == 'amd64'
+      - if: matrix.arch == 'amd64'
         name: create-archive for linux amd64
-        run: tar -czf audioloader-linux-amd64-${{ github.ref_name }}.tar.gz audioloader
+        run: tar -czf audioloader-linux-amd64-${{ github.ref_name }}.tar.gz audioloader static
 
-      - if: matrix.os == 'ubuntu-latest' && matrix.arch == 'arm7'
+      - if: matrix.arch == 'arm64'
+        name: create-archive for linux arm64
+        run: tar -czf audioloader-linux-arm64-${{ github.ref_name }}.tar.gz audioloader static
+
+      - if: matrix.arch == 'arm7'
         name: create-archive for linux arm7
-        run: tar -czf audioloader-linux-arm7-${{ github.ref_name }}.tar.gz audioloader
+        run: tar -czf audioloader-linux-arm7-${{ github.ref_name }}.tar.gz audioloader static
 
-      - if: matrix.os == 'macos-latest' && matrix.arch == 'arm64'
-        name: create-archive for macos arm64
-        run: tar -czf audioloader-macos-arm64-${{ github.ref_name }}.tar.gz audioloader
-
-      - if: matrix.os == 'macos-13' && matrix.arch == 'amd64'
-        name: create-archive for macos amd64
-        run: tar -czf audioloader-macos-amd64-${{ github.ref_name }}.tar.gz audioloader
-
-      - if: matrix.os == 'ubuntu-latest' && matrix.arch == 'amd64'
+      - if: matrix.arch == 'amd64'
         name: Upload Release Asset Linux amd64
         id: upload-release-asset-linux-amd64
         uses: actions/upload-release-asset@v1
@@ -95,7 +79,19 @@ jobs:
           asset_name: audioloader-linux-amd64-${{ github.ref_name }}.tar.gz
           asset_content_type: application/x-tgz
 
-      - if: matrix.os == 'ubuntu-latest' && matrix.arch == 'arm7'
+      - if: matrix.arch == 'arm64'
+        name: Upload Release Asset Linux arm64
+        id: upload-release-asset-linux-arm64
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
+        with:
+          upload_url: ${{ needs.once.outputs.upload_url }}
+          asset_path: ./audioloader-linux-arm64-${{ github.ref_name }}.tar.gz
+          asset_name: audioloader-linux-arm64-${{ github.ref_name }}.tar.gz
+          asset_content_type: application/x-tgz
+
+      - if: matrix.arch == 'arm7'
         name: Upload Release Asset Linux arm7
         id: upload-release-asset-linux-arm7
         uses: actions/upload-release-asset@v1
@@ -106,51 +102,3 @@ jobs:
           asset_path: ./audioloader-linux-arm7-${{ github.ref_name }}.tar.gz
           asset_name: audioloader-linux-arm7-${{ github.ref_name }}.tar.gz
           asset_content_type: application/x-tgz
-
-      - if: matrix.os == 'macos-13' && matrix.arch == 'amd64'
-        name: Upload Release Asset MacOS amd64
-        id: upload-release-asset-macos-amd64
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.TOKEN }}
-        with:
-          upload_url: ${{ needs.once.outputs.upload_url }}
-          asset_path: ./audioloader-macos-amd64-${{ github.ref_name }}.tar.gz
-          asset_name: audioloader-macos-amd64-${{ github.ref_name }}.tar.gz
-          asset_content_type: application/x-tgz
-
-      - if: matrix.os == 'macos-latest' && matrix.arch == 'arm64'
-        name: Upload Release Asset MacOS arm64
-        id: upload-release-asset-macos-arm64
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.TOKEN }}
-        with:
-          upload_url: ${{ needs.once.outputs.upload_url }}
-          asset_path: ./audioloader-macos-arm64-${{ github.ref_name }}.tar.gz
-          asset_name: audioloader-macos-arm64-${{ github.ref_name }}.tar.gz
-          asset_content_type: application/x-tgz
-
-      - if: matrix.os == 'windows-latest' && matrix.arch == 'amd64'
-        name: Upload Release Asset Windows
-        id: upload-release-asset-windows
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.TOKEN }}
-        with:
-          upload_url: ${{ needs.once.outputs.upload_url }}
-          asset_path: ./audioloader-windows-amd64-${{ github.ref_name }}.zip
-          asset_name: audioloader-windows-amd64-${{ github.ref_name }}.zip
-          asset_content_type: application/zip
-
-      - if: matrix.os == 'windows-latest' && matrix.arch == 'amd64'
-        name: Upload Release Asset only executable for winget
-        id: upload-release-asset_windows_exe-amd64
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.TOKEN }}
-        with:
-          upload_url: ${{ needs.once.outputs.upload_url }}
-          asset_path: audioloader.exe
-          asset_name: audioloader.exe
-          asset_content_type: application/vnd.microsoft.portable-executable
