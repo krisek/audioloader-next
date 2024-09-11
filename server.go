@@ -62,11 +62,12 @@ var ctx = context.Background()
 
 var (
     redisClient *redis.Client
-    bandcampEnabled, _ = strconv.ParseBool(getEnv("BANDCAMP_ENABLED", "true"))
-    clientDB = getEnv("CLIENT_DB", getEnv("HOME", "/tmp") + "/Music/audioloader-db")
-    defaultStream = getEnv("DEFAULT_STREAM", "http://" + os.Getenv("HOST") + ":8000/audio.ogg")
-    mpdHost = getEnv("MPD_HOST", "localhost")
-    mpdPort = getEnv("MPD_PORT", "6600")
+    bandcampEnabled, _ = strconv.ParseBool(getEnv("AL_BANDCAMP_ENABLED", "true"))
+    clientDB = getEnv("AL_CLIENT_DB", getEnv("HOME", "/tmp") + "/Music/audioloader-db")
+    defaultStream = getEnv("AL_DEFAULT_STREAM", "http://" + os.Getenv("HOST") + ":8000/audio.ogg")
+    mpdHost = getEnv("AL_MPD_HOST", "localhost")
+    mpdPort = getEnv("AL_MPD_PORT", "6600")
+    listeningPort = getEnv("AL_LISTENING_PORT", "3400")
 )
 
 // Helper function to get environment variables with a default value
@@ -148,8 +149,8 @@ func main() {
     handler := cors.Default().Handler(http.DefaultServeMux)
 
     // Start HTTP server
-    log.Println("Starting server on :8080")
-    log.Fatal(http.ListenAndServe(":8080", handler))
+    log.Printf("Starting server on: http://localhost:%v/static/", listeningPort)
+    log.Fatal(http.ListenAndServe(":" + listeningPort, handler))
 }
 
 
