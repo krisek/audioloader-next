@@ -68,6 +68,7 @@ var (
     mpdHost = getEnv("AL_MPD_HOST", "localhost")
     mpdPort = getEnv("AL_MPD_PORT", "6600")
     listeningPort = getEnv("AL_LISTENING_PORT", "3400")
+    libraryPath = getEnv("AL_LIBRARY_PATH", getEnv("HOME", "/media") + "/Music" )
 )
 
 // Helper function to get environment variables with a default value
@@ -243,8 +244,8 @@ func coverHandler(w http.ResponseWriter, r *http.Request) {
         if cover == "vinyl.webp" {
             coverPath = "./static/assets/vinyl.webp"
         } else {
-            libraryPath := getEnv("LIBRARY_PATH", "/home/kris/Music/opus")
-            coverPath = filepath.Join(libraryPath, directory, cover)		}
+            coverPath = filepath.Join(libraryPath, directory, cover)		
+        }
         if _, err := os.Stat(coverPath); os.IsNotExist(err) {
             log.Printf("Cover not found, falling back to default: %v", coverPath)
             coverPath = "./static/assets/vinyl.webp"
