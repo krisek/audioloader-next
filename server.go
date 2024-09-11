@@ -1050,8 +1050,8 @@ func extractAlbumDetails(doc *goquery.Document) (string, string, string, string)
 
 func getBandcampTrackURLs(url string) ([]string, error) {
     // Define the yt-dlp command with options to extract URLs
-    log.Printf("Running yt-dlp -g %v", url)
-    cmd := exec.Command("yt-dlp", "-g", url)
+    log.Printf("Running yt-dlp -f bestaudio -g %v", url)
+    cmd := exec.Command("yt-dlp", "-f", "bestaudio", "-g", url)
 
     // Capture the output
     var out bytes.Buffer
