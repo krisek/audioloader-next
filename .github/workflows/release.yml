@@ -66,7 +66,7 @@ jobs:
           export CC=`find $ANDROID_HOME -name aarch64-linux-android21-clang | head -1`
 
           go build -v -o audioloader server.go 2>&1 | tee build.log
-          tar -czvf audioloader-android-arm64-${{ github.ref_name }}.tar.gz audioloader static
+          tar -czvf audioloader-arm64-android-${{ github.ref_name }}.tar.gz audioloader static
 
       - name: Build and package for Linux and Android
         if: matrix.os == 'ubuntu-latest'
