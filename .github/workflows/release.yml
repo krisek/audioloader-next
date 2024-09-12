@@ -67,27 +67,26 @@ jobs:
             export GOOS=linux
             export CGO_ENABLED=0
             go build -v -o audioloader server.go
-            tar -czf audioloader-linux-amd64-${{ github.ref_name }}.tar.gz audioloader static
+            tar -czvf audioloader-linux-amd64-${{ github.ref_name }}.tar.gz audioloader static
           elif [[ "${{ matrix.arch }}" == "arm64" ]]; then
             export GOARCH=arm64
             export GOOS=linux
             export CGO_ENABLED=0
             go build -v -o audioloader server.go
-            tar -czf audioloader-linux-arm64-${{ github.ref_name }}.tar.gz audioloader static
+            tar -czvf audioloader-linux-arm64-${{ github.ref_name }}.tar.gz audioloader static
           elif [[ "${{ matrix.arch }}" == "arm64-android" ]]; then
             export GOARCH=arm64 
             export GOOS=android
             export CGO_ENABLED=1
-            export CC=aarch64-linux-android21-clang
             go build -v -o audioloader server.go
-            tar -czf audioloader-linux-arm64-android-${{ github.ref_name }}.tar.gz audioloader static
+            tar -czvf audioloader-linux-arm64-android-${{ github.ref_name }}.tar.gz audioloader static
           elif [[ "${{ matrix.arch }}" == "arm7" ]]; then
             export GOARCH=arm
             export GOOS=linux
             export GOARM=7
             export CGO_ENABLED=0
             go build -v -o audioloader server.go
-            tar -czf audioloader-linux-arm7-${{ github.ref_name }}.tar.gz audioloader static
+            tar -czvf audioloader-linux-arm7-${{ github.ref_name }}.tar.gz audioloader static
           fi
 
       - name: Build and package for Windows
