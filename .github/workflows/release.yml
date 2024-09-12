@@ -57,14 +57,15 @@ jobs:
           mv /tmp/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platform-tools" "ndk-bundle" "platforms;android-21"
-
           export ANDROID_NDK_HOME=$ANDROID_HOME/ndk-bundle
           export PATH=$ANDROID_NDK_HOME:$PATH
           export GOARCH=arm64
           export CGO_ENABLED=1
           export GOOS=android
-          export CC=aarch64-linux-android21-clang
-          go build -v -o audioloader server.go
+          find $ANDROID_HOME -name aarch64-linux-android21-clang
+          export CC=`find $ANDROID_HOME -name aarch64-linux-android21-clang | head -1`
+
+          go build -v -o audioloader server.go 2>&1 | tee build.log
           tar -czvf audioloader-android-arm64-${{ github.ref_name }}.tar.gz audioloader static
 
       - name: Build and package for Linux and Android
