@@ -74,8 +74,8 @@ jobs:
       - name: Build and package for Windows
         if: matrix.os == 'windows-latest' && matrix.arch == 'amd64'
         run: |
-          cmd /C "set CGO_ENABLED=0 && set GOOS=windows && go build -v -o audioloader.exe server.go"
-          powershell Compress-Archive -Path audioloader.exe,static -DestinationPath audioloader-windows-amd64-${{ github.ref_name }}.zip
+          cmd /C "set CGO_ENABLED=0 && go build -v -o audioloader.exe server.go"
+          powershell Compress-Archive -Path audioloader.exe,static -DestinationPath audioloader-windows-x86_64-${{ github.ref_name }}.zip
 
       - name: Upload Release Asset Linux amd64
         if: matrix.arch == 'amd64'  && matrix.os == 'ubuntu-latest'
@@ -133,7 +133,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.TOKEN }}
         with:
           upload_url: ${{ needs.once.outputs.upload_url }}
-          asset_path: ./audioloader-windows-amd64-${{ github.ref_name }}.zip
-          asset_name: audioloader-windows-amd64-${{ github.ref_name }}.zip
+          asset_path: ./audioloader-windows-x86_64-${{ github.ref_name }}.zip
+          asset_name: audioloader-windows-x86_64-${{ github.ref_name }}.zip
           asset_content_type: application/zip
 
