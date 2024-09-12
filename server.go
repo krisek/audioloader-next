@@ -8,7 +8,6 @@ import (
     "github.com/robfig/cron/v3"
     "github.com/rs/cors"
     "html/template"
-    "log"
     "net/http"
     "strconv"
     "os"
@@ -25,6 +24,8 @@ import (
     "net/url"
     "bytes"
     "github.com/PuerkitoBio/goquery"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 type FileInfo struct {
@@ -57,6 +58,7 @@ var (
     mpdPort = getEnv("AL_MPD_PORT", "6600")
     listeningPort = getEnv("AL_LISTENING_PORT", "3400")
     libraryPath = getEnv("AL_LIBRARY_PATH", getEnv("HOME", "/media") + "/Music" )
+    logLevel = getEnv("AL_LOG_LEVEL", "info")
 )
 
 // Helper function to get environment variables with a default value
@@ -78,7 +80,7 @@ func getMPDClient(host string, port string) (*mpd.Client, error) {
     // Dial the MPD server and return the client
     client, err := mpd.Dial("tcp", address)
     if err != nil {
-        log.Printf("Failed to connect to MPD server at %s: %v", address, err)
+        log.Error().Str("function", "getMPDClient").Msg(fmt.Sprintf("Failed to connect to MPD server at %s: %v", address, err))
         return nil, err
     }
     
@@ -86,6 +88,26 @@ func getMPDClient(host string, port string) (*mpd.Client, error) {
 }
 
 func main() {
+
+	// Configure zerolog
+	var level zerolog.Level
+	switch logLevel {
+	case "debug":
+		level = zerolog.DebugLevel
+	case "info":
+		level = zerolog.InfoLevel
+	case "warn":
+		level = zerolog.WarnLevel
+	case "error":
+		level = zerolog.ErrorLevel
+	default:
+		level = zerolog.WarnLevel
+	}
+
+	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "2006-01-02 15:04:05"}).
+		Level(level).With().
+        Timestamp().
+        Logger()
 
     // Initialize Redis client
     redisClient = redis.NewClient(&redis.Options{
@@ -138,13 +160,14 @@ func main() {
     handler := cors.Default().Handler(http.DefaultServeMux)
 
     // Start HTTP server
-    log.Printf("Starting server on: http://localhost:%v/static/", listeningPort)
-    log.Fatal(http.ListenAndServe(":" + listeningPort, handler))
+    log.Info().Str("function", "main").Msg(fmt.Sprintf("Starting server on: http://localhost:%v/", listeningPort))
+    http.ListenAndServe(":" + listeningPort, handler)
+    // log.Fatal()
 }
 
 func coverHandler(w http.ResponseWriter, r *http.Request) {
     directory := r.URL.Query().Get("directory")
-    log.Printf("Getting cover for: %s", directory)
+    log.Debug().Str("function", "coverHandler").Msg(fmt.Sprintf("Getting cover for: %s", directory))
 
     responseType := r.URL.Query().Get("response_type")
     if responseType == "" {
@@ -166,11 +189,11 @@ func coverHandler(w http.ResponseWriter, r *http.Request) {
     if err == redis.Nil {
         cover = "vinyl.webp"
     } else if err != nil {
-        log.Printf("Redis error: %v", err)
+        log.Debug().Str("function", "coverHandler").Msg(fmt.Sprintf("Redis error: %v", err))
         cover = "vinyl.webp"
     } else {
         cover = val
-        log.Printf("Got cover from Redis: %s", cover)
+        log.Debug().Str("function", "coverHandler").Msg(fmt.Sprintf("Got cover from Redis: %s", cover))
     }
 
     // If the cover is not found, search the MPD directory
@@ -180,7 +203,7 @@ func coverHandler(w http.ResponseWriter, r *http.Request) {
         mpdClient.Close()
 
         if err != nil {
-            log.Printf("Error listing files: %v", err)
+            log.Debug().Str("function", "coverHandler").Msg(fmt.Sprintf("Error listing files: %v", err))
             http.Error(w, "Failed to list files", http.StatusInternalServerError)
             return
         }
@@ -197,7 +220,7 @@ func coverHandler(w http.ResponseWriter, r *http.Request) {
         }
 
 
-        log.Printf("Found images: %v", images)
+        log.Debug().Str("function", "coverHandler").Msg(fmt.Sprintf("Found images: %v", images))
         for _, image := range images {
             if coverPattern.MatchString(image) {
                 cover = image
@@ -209,11 +232,11 @@ func coverHandler(w http.ResponseWriter, r *http.Request) {
             cover = images[0]
         }
 
-        log.Printf("Selected cover: %s", cover)
+        log.Debug().Str("function", "coverHandler").Msg(fmt.Sprintf("Selected cover: %s", cover))
 
         // Save the cover in Redis
         if err := rdb.Set(ctx, "audioloader:cover:"+directory, cover, 0).Err(); err != nil {
-            log.Printf("Error setting cover in Redis: %v", err)
+            log.Debug().Str("function", "coverHandler").Msg(fmt.Sprintf("Error setting cover in Redis: %v", err))
         }
     }
 
@@ -234,10 +257,10 @@ func coverHandler(w http.ResponseWriter, r *http.Request) {
             coverPath = filepath.Join(libraryPath, directory, cover)		
         }
         if _, err := os.Stat(coverPath); os.IsNotExist(err) {
-            log.Printf("Cover not found, falling back to default: %v", coverPath)
+            log.Debug().Str("function", "coverHandler").Msg(fmt.Sprintf("Cover not found, falling back to default: %v", coverPath))
             coverPath = "./static/assets/vinyl.webp"
         }
-        log.Printf("Serving cover: %v", coverPath)
+        log.Debug().Str("function", "coverHandler").Msg(fmt.Sprintf("Serving cover: %v", coverPath))
         http.ServeFile(w, r, coverPath)
     }
 }
@@ -288,17 +311,14 @@ func readData(clientID string, dataType string) (ClientData, error) {
     // Read the file
     data, err := ioutil.ReadFile(clientDataFile)
     if err != nil {
-        log.Printf("Warning: %s for %s not readable: %v\n", dataType, clientID, err)
+        log.Debug().Str("function", "readData").Msg(fmt.Sprintf("Error %s for %s not readable: %v\n", dataType, clientID, err))
         return ClientData{}, fmt.Errorf("not readable")
     }
-
-    // Log the data as a string for debugging
-    // log.Printf("readData - data read: %s", string(data))
 
     // Unmarshal JSON into ClientData struct
     var clientdata ClientData
     if err := json.Unmarshal(data, &clientdata); err != nil {
-        log.Printf("Error parsing JSON for %s: %v\n", clientID, err)
+        log.Debug().Str("function", "readData").Msg(fmt.Sprintf("Error parsing JSON for %s: %v\n", clientID, err))
         return ClientData{}, fmt.Errorf("Cannot encode")
     }
 
@@ -334,7 +354,6 @@ func upnpHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    log.Println("Server:", server)
     action := r.URL.Query().Get("action")
     if action == "" {
         action = "Player.Stop"
@@ -348,7 +367,7 @@ func upnpHandler(w http.ResponseWriter, r *http.Request) {
         // Handle UPnP device actions
         err := handleUPnP(server, action, streamURL)
         if err != nil {
-            log.Printf("UPnP Error: %v", err)
+            log.Debug().Str("function", "upnpHandler").Msg(fmt.Sprintf("UPnP Error: %v", err))
             json.NewEncoder(w).Encode(map[string]string{"result": "load failed"})
             return
         }
@@ -356,7 +375,7 @@ func upnpHandler(w http.ResponseWriter, r *http.Request) {
         // Handle MPD device actions
         err := handleMPD(server, action, streamURL)
         if err != nil {
-            log.Printf("MPD Error: %v", err)
+            log.Debug().Str("function", "upnpHandler").Msg(fmt.Sprintf("MPD Error: %v", err))
             json.NewEncoder(w).Encode(map[string]string{"result": "load failed"})
             return
         }
@@ -505,7 +524,7 @@ func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
     mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
     albums, err := mpdClient.List("album")
     if err != nil {
-        log.Printf("Error listing albums: %v\n", err)
+        log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("Error listing albums: %v\n", err))
         http.Error(w, "failed to generate randomset", http.StatusInternalServerError)
         return
     }
@@ -520,7 +539,7 @@ func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
         for _, album := range randomAlbums {
             albumData, err := mpdClient.Search("album", album)
             if err != nil {
-                log.Printf("Error searching album %s: %v\n", album, err)
+                log.Debug().Str("function", "").Msg(fmt.Sprintf("Error searching album %s: %v\n", album, err))
                 continue
             }
 
@@ -543,19 +562,19 @@ func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
     
     // Ensure randomset has unique albums and limit to 12
     clientData.Randomset = uniqueStrings(clientData.Randomset)[:min(12, len(clientData.Randomset))]
-    log.Printf("clientdata unique - %v", clientData.Randomset)
+    log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("clientdata unique - %v", clientData.Randomset))
 
     
     // Save to file
     clientDataFile := filepath.Join(clientDB, fmt.Sprintf("%s.randomset.json", clientID))
 
-    log.Printf("clientDataFile - %v", clientDataFile)
-    log.Printf("filepath.HasPrefix(clientDataFile, clientDB)- %v %v", filepath.HasPrefix(clientDataFile, clientDB), isValidFileName(clientDataFile))
+    log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("clientDataFile - %v", clientDataFile))
+    log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("filepath.HasPrefix(clientDataFile, clientDB)- %v %v", filepath.HasPrefix(clientDataFile, clientDB), isValidFileName(clientDataFile)))
     if clientID != "" && filepath.HasPrefix(clientDataFile, clientDB) && isValidFileName(clientDataFile) {
         file, err := os.Create(clientDataFile)
-        log.Printf("clientDataFile created %v", clientDataFile)
+        log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("clientDataFile created %v", clientDataFile))
         if err != nil {
-            log.Printf("Error writing randomset file: %v\n", err)
+            log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("Error writing randomset file: %v\n", err))
             http.Error(w, "failed to save randomset", http.StatusInternalServerError)
             return
         }
@@ -563,7 +582,7 @@ func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
 
         encoder := json.NewEncoder(file)
         if err := encoder.Encode(clientData); err != nil {
-            log.Printf("Error encoding JSON: %v\n", err)
+            log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("Error encoding JSON: %v\n", err))
             http.Error(w, "failed to save randomset", http.StatusInternalServerError)
             return
         }
@@ -613,7 +632,7 @@ func favouritesHandler(w http.ResponseWriter, r *http.Request) {
     // Read existing favourites data
     clientData, err := readData(clientID, "favourites")
     if err != nil {
-        log.Printf("readData failed for favourites %s: %v\n", clientID, err)
+        log.Error().Str("function", "favouritesHandler").Msg(fmt.Sprintf("readData failed for favourites %s: %v\n", clientID, err))
         // http.Error(w, "Failed to load favourites", http.StatusInternalServerError)
         // return
     }
@@ -637,7 +656,7 @@ func favouritesHandler(w http.ResponseWriter, r *http.Request) {
 
     // Write updated data back to the file
     if err := writeData(clientID, "favourites", clientData); err != nil {
-        log.Printf("writeData failed for favourites %s: %v\n", clientID, err)
+        log.Error().Str("function", "favouritesHandler").Msg(fmt.Sprintf("writeData failed for favourites %s: %v\n", clientID, err))
         http.Error(w, "Failed to save favourites", http.StatusInternalServerError)
         return
     }
@@ -684,7 +703,7 @@ func radioHistoryHandler(w http.ResponseWriter, r *http.Request) {
 
     clientData, err := readData(clientID, "radio_history")
     if err != nil {
-        log.Printf("readData failed for radio_history %s: %v\n", clientID, err)
+        log.Error().Str("function", "radioHistoryHandler").Msg(fmt.Sprintf("readData failed for radio_history %s: %v\n", clientID, err))
         json.NewEncoder(w).Encode(map[string]interface{}{
             "tree": []interface{}{},
             "info": map[string]interface{}{},
@@ -695,7 +714,7 @@ func radioHistoryHandler(w http.ResponseWriter, r *http.Request) {
     // Return the clientData in JSON format
     w.Header().Set("Content-Type", "application/json")
     if err := json.NewEncoder(w).Encode(clientData); err != nil {
-        log.Printf("Failed to encode radio history data for %s: %v\n", clientID, err)
+        log.Error().Str("function", "radioHistoryHandler").Msg(fmt.Sprintf("Failed to encode radio history data for %s: %v\n", clientID, err))
         json.NewEncoder(w).Encode(map[string]interface{}{
             "tree": []interface{}{},
             "info": map[string]interface{}{},
@@ -715,7 +734,7 @@ func bandcampHistoryHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
 
     if err != nil {
-        log.Printf("readData failed for bandcamp_history %s: %v\n", clientID, err)
+        log.Error().Str("function", "bandcampHistoryHandler").Msg(fmt.Sprintf("readData failed for bandcamp_history %s: %v\n", clientID, err))
         // http.Error(w, "Failed to load bandcamp history", http.StatusInternalServerError)
         // return
         json.NewEncoder(w).Encode(map[string]interface{}{
@@ -728,7 +747,7 @@ func bandcampHistoryHandler(w http.ResponseWriter, r *http.Request) {
     // Return the clientData in JSON format
     
     if err := json.NewEncoder(w).Encode(clientData); err != nil {
-        log.Printf("Failed to encode bandcamp history data for %s: %v\n", clientID, err)
+        log.Error().Str("function", "bandcampHistoryHandler").Msg(fmt.Sprintf("Failed to encode bandcamp history data for %s: %v\n", clientID, err))
         json.NewEncoder(w).Encode(map[string]interface{}{
             "tree": []interface{}{},
             "info": map[string]interface{}{},
@@ -774,12 +793,12 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
     clientID := r.URL.Query().Get("client_id")
     dataPath := r.URL.Path[1:]
 
-    log.Printf("%v - %v", clientID, dataPath)
+    log.Debug().Str("function", "dataHandler").Msg(fmt.Sprintf("%v - %v", clientID, dataPath))
 
     // Read the data based on the path (history, randomset, etc.)
     ClientData, err := readData(clientID, dataPath)
     if err != nil {
-        log.Printf("readData failed %s: %v\n", clientID, err)
+        log.Error().Str("function", "dataHandler").Msg(fmt.Sprintf("readData failed %s: %v\n", clientID, err))
     }
 
     // Function to process the data for any string slice (History, Randomset, etc.)
@@ -787,14 +806,14 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
         var fileInfos []FileInfo
         mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
         for _, directory := range directories {
-            log.Printf("processing %v", directory)
+            log.Debug().Str("function", "dataHandler").Msg(fmt.Sprintf("processing %v", directory))
             directoryStr := directory
 
             // If it's not a root or HTTP directory
             if directoryStr != "/" && !isHTTP(directoryStr) {
                 count, err := mpdClient.Count("base", directoryStr)
                 if err != nil {
-                    log.Printf("Could not get count for %s: %v\n", directoryStr, err)
+                    log.Debug().Str("function", "dataHandler").Msg(fmt.Sprintf("Could not get count for %s: %v\n", directoryStr, err))
                     continue
                 }
                 seconds, err := strconv.Atoi(count[1])
@@ -877,28 +896,28 @@ func searchRadioHandler(w http.ResponseWriter, r *http.Request) {
     
     req, err := http.NewRequest("GET", url, nil)
     if err != nil {
-        log.Printf("Error creating request: %v", err)
+        log.Error().Str("function", "searchRadioHandler").Msg(fmt.Sprintf("Error creating request: %v", err))
         http.Error(w, "Internal Server Error", http.StatusInternalServerError)
         return
     }
 
     resp, err := client.Do(req)
     if err != nil {
-        log.Printf("Error making request to Radio Browser API: %v", err)
+        log.Debug().Str("function", "").Msg(fmt.Sprintf("Error making request to Radio Browser API: %v", err))
         http.Error(w, "Internal Server Error", http.StatusInternalServerError)
         return
     }
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        log.Printf("API responded with status code: %v", resp.StatusCode)
+        log.Error().Str("function", "searchRadioHandler").Msg(fmt.Sprintf("API responded with status code: %v", resp.StatusCode))
         http.Error(w, "Failed to fetch radio stations", http.StatusBadRequest)
         return
     }
-    log.Printf("radio stations: %s", resp.Body)
+    log.Debug().Str("function", "searchRadioHandler").Msg(fmt.Sprintf("radio stations: %s", resp.Body))
     var stations []RadioStation
     if err := json.NewDecoder(resp.Body).Decode(&stations); err != nil {
-        log.Printf("Error decoding response: %v", err)
+        log.Error().Str("function", "searchRadioHandler").Msg(fmt.Sprintf("Error decoding response: %v", err))
         http.Error(w, "Failed to process response", http.StatusInternalServerError)
         return
     }
@@ -935,7 +954,7 @@ func searchBandcampHandler(w http.ResponseWriter, r *http.Request) {
     if strings.Contains(pattern, "bandcamp.com") {
         albumList, err := handleBandcampSearch(pattern)
         if err != nil {
-            log.Printf("Exception during Bandcamp search: %v", err)
+            log.Error().Str("function", "searchBandcampHandler").Msg(fmt.Sprintf("Exception during Bandcamp search: %v", err))
             json.NewEncoder(w).Encode(content)
             return
         }
@@ -953,7 +972,7 @@ func searchBandcampHandler(w http.ResponseWriter, r *http.Request) {
 
 // handleBandcampSearch fetches album info for Bandcamp URLs
 func handleBandcampSearch(pattern string) ([]map[string]interface{}, error) {
-    log.Printf("Searching for Bandcamp album: %s", pattern)
+    log.Debug().Str("function", "searchBandcampHandler").Msg(fmt.Sprintf("Searching for Bandcamp album: %s", pattern))
 
     albumInfo, err := getBandcampAlbumInfo(pattern)
     if err != nil {
@@ -965,7 +984,7 @@ func handleBandcampSearch(pattern string) ([]map[string]interface{}, error) {
 
 // handleYouTubeSearch returns metadata for YouTube links
 func handleYouTubeSearch(pattern string) map[string]interface{} {
-    log.Printf("Returning YouTube link: %s", pattern)
+    log.Debug().Str("function", "handleYouTubeSearch").Msg(fmt.Sprintf("Returning YouTube link: %s", pattern))
 
     return map[string]interface{}{
         "url":    pattern,
@@ -978,7 +997,7 @@ func handleYouTubeSearch(pattern string) map[string]interface{} {
 
 // getBandcampAlbumInfo fetches metadata and track URLs from a Bandcamp album page
 func getBandcampAlbumInfo(url string) (map[string]interface{}, error) {
-    log.Printf("Fetching Bandcamp album info from: %s", url)
+    log.Debug().Str("function", "getBandcampAlbumInfo").Msg(fmt.Sprintf("Fetching Bandcamp album info from: %s", url))
 
     // Fetch the page content
     resp, err := http.Get(url)
@@ -1027,7 +1046,7 @@ func extractAlbumDetails(doc *goquery.Document) (string, string, string, string)
 
 func getBandcampTrackURLs(url string) ([]string, error) {
     // Define the yt-dlp command with options to extract URLs
-    log.Printf("Running yt-dlp -f bestaudio -g %v", url)
+    log.Debug().Str("function", "getBandcampTrackURLs").Msg(fmt.Sprintf("Running yt-dlp -f bestaudio -g %v", url))
     cmd := exec.Command("yt-dlp", "-f", "bestaudio", "-g", url)
 
     // Capture the output
@@ -1103,17 +1122,17 @@ func removeHistoryHandler(w http.ResponseWriter, r *http.Request) {
         clientID = "guest"
     }
 
-    log.Printf("need to deal with %v %v", history)
+    log.Debug().Str("function", "removeHistoryHandler").Msg(fmt.Sprintf("need to deal with %v %v", history))
 
     // Read the client history
     clientHistory, err := readData(clientID, history)
     if err != nil {
         http.Error(w, "Failed to read client history", http.StatusInternalServerError)
-        log.Printf("Failed to read client history: %v", err)
+        log.Debug().Str("function", "").Msg(fmt.Sprintf("Failed to read client history: %v", err))
         return
     }
 
-    log.Printf("read %v", clientHistory, playable)
+    log.Debug().Str("function", "removeHistoryHandler").Msg(fmt.Sprintf("read %v", clientHistory, playable))
 
     // Remove the playable from the specific history type slice
     if playable != "" {
@@ -1131,7 +1150,7 @@ func removeHistoryHandler(w http.ResponseWriter, r *http.Request) {
     err = writeData(clientID, history, clientHistory)
     if err != nil {
         http.Error(w, "Failed to write updated history", http.StatusInternalServerError)
-        log.Printf("Failed to write updated history: %v", err)
+        log.Error().Str("function", "removeHistoryHandler").Msg(fmt.Sprintf("Failed to write updated history: %v", err))
         return
     }
 
@@ -1154,7 +1173,7 @@ func removeItem(slice []string, item string) []string {
 func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
     var content map[string]interface{} = make(map[string]interface{})
     var err error
-    log.Printf("mpdProxyHandler url: %v", r.URL.Path)
+    log.Debug().Str("function", "mpdProxyHandler").Msg(fmt.Sprintf("mpdProxyHandler url: %v", r.URL.Path))
     mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
 
     switch r.URL.Path {
@@ -1260,7 +1279,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
         for directory := range resultDirectories {
 
             subDirCount, err := mpdClient.Count("base", directory)
-            log.Printf("subDirCount: %v", subDirCount)
+            log.Debug().Str("function", "").Msg(fmt.Sprintf("subDirCount: %v", subDirCount))
             if err != nil {
                 http.Error(w, "Failed to count", http.StatusInternalServerError)
                 return
@@ -1300,7 +1319,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
         }
         listFiles, err := mpdClient.ListInfo(directory)
         if err != nil {
-            log.Printf("%v", err)
+            log.Debug().Str("function", "").Msg(fmt.Sprintf("%v", err))
             http.Error(w, "Failed to list files", http.StatusInternalServerError)
             return
         }
@@ -1314,7 +1333,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
         } else {
             count, err = mpdClient.Count("modified-since", "0")
         }
-        log.Printf("count: %v", count)
+        log.Debug().Str("function", "mpdProxyHandler:ls").Msg(fmt.Sprintf("count: %v", count))
     
         musicFiles := make(map[string]bool)
         for _, file := range lsInfo {
@@ -1328,7 +1347,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
                 lsInfo = append(lsInfo, fileRecord)
             }
         }
-        log.Printf("lsinfo g2: %v", lsInfo)
+        log.Debug().Str("function", "mpdProxyHandler:ls").Msg(fmt.Sprintf("lsinfo: %v", lsInfo))
     
         // Adjusting the info structure
         info := map[string]string{
@@ -1339,9 +1358,9 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
     
         // Adjusting the tree structure
         var fileInfos []FileInfo
-        log.Printf("iterating lsinfo")
+        log.Debug().Str("function", "mpdProxyHandler:ls").Msg(fmt.Sprintf("iterating lsinfo"))
         for _, name := range lsInfo {
-            log.Printf("name: %v", name)
+            log.Debug().Str("function", "").Msg(fmt.Sprintf("name: %v", name))
             dir := name["directory"]
             if dir == "" {
                 fileInfo := FileInfo{
@@ -1364,7 +1383,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
             subDir := dir
 
             subDirCount, err := mpdClient.Count("base", dir)
-            log.Printf("subDirCount: %v", subDirCount)
+            log.Debug().Str("function", "").Msg(fmt.Sprintf("subDirCount: %v", subDirCount))
             seconds, err := strconv.Atoi(subDirCount[1])
             if err != nil {
                 http.Error(w, "Failed to parse count", http.StatusInternalServerError)
@@ -1407,7 +1426,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
             fileInfos = append(fileInfos, fileInfo)
         }
     
-        log.Printf("fileInfos: %v", fileInfos)
+        log.Debug().Str("function", "mpdProxyHandler:ls").Msg(fmt.Sprintf("fileInfos: %v", fileInfos))
         content["tree"] = fileInfos
     
     case "/addplay":
@@ -1441,10 +1460,10 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
         }
         
         if playable != "" {
-            log.Printf("Playable: %v", playable)
+            log.Debug().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("Playable: %v", playable))
             mpdClient.Add(playable)
         } else if len(playables) > 0 {
-            log.Printf("Playables: %v", playables)
+            log.Debug().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("Playables: %v", playables))
             for _, item := range(playables) {
                 mpdClient.Add(item)
             }
@@ -1457,7 +1476,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
         if r.URL.Query().Get("directory") != "" && clientID != "" {
             ClientData, err := readData(clientID, "history")
             if err != nil {
-                log.Println(err)
+                log.Error().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("%v", err))
             }
             
             // Check if 'playable' exists in the client history
@@ -1536,7 +1555,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
             }
             // Write the updated data back to the file
             if err := writeData(clientID, "radio_history", clientData); err != nil {
-                log.Printf("Failed to write radio history for %s: %v", clientID, err)
+                log.Error().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("Failed to write radio history for %s: %v", clientID, err))
                 http.Error(w, "Failed to update radio history", http.StatusInternalServerError)
                 return
             }
@@ -1592,7 +1611,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 
             // Write the updated data back to the file
             if err := writeData(clientID, "bandcamp_history", clientData); err != nil {
-                log.Printf("Failed to write bandcamp history for %s: %v", clientID, err)
+                log.Error().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("Failed to write bandcamp history for %s: %v", clientID, err))
                 http.Error(w, "Failed to update bandcamp history", http.StatusInternalServerError)
                 return
             }
@@ -1630,26 +1649,26 @@ func getActivePlayers() []map[string]interface{} {
         key := iter.Val()
         lastSeenStr, err := rdb.Get(ctx, key).Result()
         if err != nil {
-            log.Printf("Failed to get last seen: %v", err)
+            log.Debug().Str("function", "getActivePlayers").Msg(fmt.Sprintf("Failed to get last seen: %v", err))
             continue
         }
 
         lastSeen, err := strconv.ParseFloat(lastSeenStr, 64)
         if err != nil {
-            log.Printf("Failed to parse last seen: %v", err)
+            log.Debug().Str("function", "getActivePlayers").Msg(fmt.Sprintf("Failed to parse last seen: %v", err))
             continue
         }
 
         if time.Now().Unix()-int64(lastSeen) < 1200 {
             dataStr, err := rdb.Get(ctx, strings.Replace(key, "last_seen", "data", 1)).Result()
             if err != nil {
-                log.Printf("Failed to get data: %v", err)
+                log.Debug().Str("function", "getActivePlayers").Msg(fmt.Sprintf("Failed to get data: %v", err))
                 continue
             }
 
             var data map[string]interface{}
             if err := json.Unmarshal([]byte(dataStr), &data); err != nil {
-                log.Printf("Failed to unmarshal data: %v", err)
+                log.Debug().Str("function", "getActivePlayers").Msg(fmt.Sprintf("Failed to unmarshal data: %v", err))
                 continue
             }
 
@@ -1663,7 +1682,7 @@ func getActivePlayers() []map[string]interface{} {
         }
     }
     if err := iter.Err(); err != nil {
-        log.Printf("Failed to iterate: %v", err)
+        log.Debug().Str("function", "getActivePlayers").Msg(fmt.Sprintf("Failed to iterate: %v", err))
     }
 
     return players
@@ -1746,9 +1765,9 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
     go func() {
         result, err := mpdClient.Idle("playlist", "player")
         if err == nil {
-            log.Printf("Failed to wait for MPD events: %v", err)
+            log.Debug().Str("function", "pollCurrentSongHandler").Msg(fmt.Sprintf("Failed to wait for mpd events: %v", err))
         } else {
-            log.Printf("We've got something back: %v", result)
+            log.Debug().Str("function", "pollCurrentSongHandler").Msg(fmt.Sprintf("We've got something back: %v", result))
         }
         done <- true
     }()
@@ -1756,10 +1775,10 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
     select {
     case <-done:
         // MPD event received
-        log.Printf("Something happened")
+        log.Debug().Str("function", "pollCurrentSongHandler").Msg(fmt.Sprintf("Something happened in mpd"))
     case <-time.After(timeout):
         // Timeout occurred
-        log.Printf("Timeout waiting for MPD events")
+        log.Debug().Str("function", "pollCurrentSongHandler").Msg(fmt.Sprintf("Timeout waiting for mpd events"))
     }
 
     mpdClient.Close()
@@ -1768,12 +1787,12 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
     // Get current song and status
     currentsong, err := mpdClient.CurrentSong()
     if err != nil {
-        log.Printf("Failed to get current song in pollCurrentSongHandler: %v", err)
+        log.Debug().Str("function", "pollCurrentSongHandler").Msg(fmt.Sprintf("Failed to get current song: %v", err))
     }
     
     status, err := mpdClient.Status()
     if err != nil {
-        log.Printf("Failed to get status in pollCurrentSongHandler: %v", err)
+        log.Debug().Str("function", "pollCurrentSongHandler").Msg(fmt.Sprintf("Failed to get status: %v", err))
     }
 
     // Convert mpd.Attrs to map[string]interface{}
@@ -1801,7 +1820,7 @@ func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
 
     // Directly encode the final currentsongMap to JSON
     if err := json.NewEncoder(w).Encode(currentsongMap); err != nil {
-        log.Printf("Error encoding JSON response: %v", err)
+        log.Debug().Str("function", "pollCurrentSongHandler").Msg(fmt.Sprintf("Error encoding JSON response: %v", err))
         // If encoding fails, send an empty JSON object as a fallback
         emptyResponse := map[string]interface{}{}
         json.NewEncoder(w).Encode(emptyResponse)
@@ -1816,14 +1835,14 @@ func currentSongHandler(w http.ResponseWriter, r *http.Request) {
     currentsong, err := mpdClient.CurrentSong()
     if err != nil {
         http.Error(w, "Failed to get current song", http.StatusInternalServerError)
-        log.Printf("Failed to get current song: %v", err)
+        log.Debug().Str("function", "currentSongHandler").Msg(fmt.Sprintf("Failed to get current song: %v", err))
         return
     }
 
     status, err := mpdClient.Status()
     if err != nil {
         http.Error(w, "Failed to get status", http.StatusInternalServerError)
-        log.Printf("Failed to get status: %v", err)
+        log.Debug().Str("function", "currentSongHandler").Msg(fmt.Sprintf("Failed to get status: %v", err))
         return
     }
 
@@ -1851,7 +1870,7 @@ func currentSongHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     if err := json.NewEncoder(w).Encode(currentsongMap); err != nil {
         http.Error(w, "Failed to encode JSON", http.StatusInternalServerError)
-        log.Printf("Failed to encode JSON: %v", err)
+        log.Debug().Str("function", "currentSongHandler").Msg(fmt.Sprintf("Failed to encode JSON: %v", err))
     }
 }
 
@@ -1861,7 +1880,7 @@ func countHandler(w http.ResponseWriter, r *http.Request) {
     if directory == "" {
         directory = "."
     }
-    log.Printf("Directory: %v", directory)
+    log.Debug().Str("function", "countHandler").Msg(fmt.Sprintf("Directory: %v", directory))
 
     mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
     // Get the count of the specified directory
@@ -1870,10 +1889,10 @@ func countHandler(w http.ResponseWriter, r *http.Request) {
     mpdClient.Close()
     if err != nil {
         http.Error(w, "Failed to get count", http.StatusInternalServerError)
-        log.Printf("Failed to get count: %v", err)
+        log.Debug().Str("function", "countHandler").Msg(fmt.Sprintf("Failed to get count: %v", err))
         return
     }
-    log.Printf("Count: %v", count)
+    log.Debug().Str("function", "countHandler").Msg(fmt.Sprintf("Count: %v", count))
     // Calculate the play hours
 
     seconds, err := strconv.Atoi(count[1])
@@ -1896,16 +1915,16 @@ func countHandler(w http.ResponseWriter, r *http.Request) {
 
 func toggleOutputHandler(w http.ResponseWriter, r *http.Request) {
     outputID := r.URL.Query().Get("output")
-    log.Printf("outputID: %v", outputID)
+    log.Debug().Str("function", "toggleOutputHandler").Msg(fmt.Sprintf("outputID: %v", outputID))
 
     mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
     // Get the current outputs
     outputs, err := mpdClient.ListOutputs()
-    log.Printf("outputs: %v", outputs)
+    log.Debug().Str("function", "toggleOutputHandler").Msg(fmt.Sprintf("outputs: %v", outputs))
 
     if err != nil {
         http.Error(w, "Failed to get outputs", http.StatusInternalServerError)
-        log.Printf("Failed to get outputs: %v", err)
+        log.Debug().Str("function", "toggleOutputHandler").Msg(fmt.Sprintf("Failed to get outputs: %v", err))
         return
     }
 
@@ -1920,7 +1939,7 @@ func toggleOutputHandler(w http.ResponseWriter, r *http.Request) {
             }
             if err != nil {
                 http.Error(w, "Failed to toggle output", http.StatusInternalServerError)
-                log.Printf("Failed to toggle output: %v", err)
+                log.Debug().Str("function", "toggleOutputHandler").Msg(fmt.Sprintf("Failed to toggle output: %v", err))
                 return
             }
             break
@@ -1931,7 +1950,7 @@ func toggleOutputHandler(w http.ResponseWriter, r *http.Request) {
     outputs, err = mpdClient.ListOutputs()
     if err != nil {
         http.Error(w, "Failed to get outputs", http.StatusInternalServerError)
-        log.Printf("Failed to get outputs: %v", err)
+        log.Debug().Str("function", "toggleOutputHandler").Msg(fmt.Sprintf("Failed to get outputs: %v", err))
         return
     }
 
@@ -1943,6 +1962,12 @@ func toggleOutputHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func catchAllHandler(w http.ResponseWriter, r *http.Request) {
+    // Redirect root path to /static/
+    if r.URL.Path == "/" {
+        http.Redirect(w, r, "/static/", http.StatusMovedPermanently)
+        return
+    }
+
     // Get the absolute path of the requested URL
     absPath := filepath.Join("./", r.URL.Path)
 
