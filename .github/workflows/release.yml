@@ -51,9 +51,9 @@ jobs:
           export ANDROID_HOME=$HOME/android
           mkdir -p $ANDROID_HOME/cmdline-tools
           unzip commandlinetools-linux-9477386_latest.zip -d $ANDROID_HOME/cmdline-tools
-          mv $ANDROID_HOME/cmdline-tools $ANDROID_HOME/cmdline-tools/tools
-          yes | $ANDROID_HOME/cmdline-tools/tools/bin/sdkmanager --licenses
-          $ANDROID_HOME/cmdline-tools/tools/bin/sdkmanager "platform-tools" "ndk-bundle" "platforms;android-21"
+          mv $ANDROID_HOME/cmdline-tools $ANDROID_HOME/tools
+          yes | $ANDROID_HOME/tools/bin/sdkmanager --licenses
+          $ANDROID_HOME/tools/bin/sdkmanager "platform-tools" "ndk-bundle" "platforms;android-21"
 
           export ANDROID_NDK_HOME=$ANDROID_HOME/ndk-bundle
           export PATH=$ANDROID_NDK_HOME:$PATH
