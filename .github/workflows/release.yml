@@ -42,6 +42,28 @@ jobs:
         with:
           go-version: '1.23'
 
+      - name: Build and package for Android
+        if: matrix.arch == 'arm64-android' && matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lib32stdc++6 lib32z1
+          wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+          export ANDROID_HOME=$HOME/android
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          unzip commandlinetools-linux-9477386_latest.zip -d $ANDROID_HOME/cmdline-tools
+          mv $ANDROID_HOME/cmdline-tools $ANDROID_HOME/cmdline-tools/tools
+          yes | $ANDROID_HOME/cmdline-tools/tools/bin/sdkmanager --licenses
+          $ANDROID_HOME/cmdline-tools/tools/bin/sdkmanager "platform-tools" "ndk-bundle" "platforms;android-21"
+
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk-bundle
+          export PATH=$ANDROID_NDK_HOME:$PATH
+          export GOARCH=arm64
+          export CGO_ENABLED=1
+          export GOOS=android
+          export CC=aarch64-linux-android21-clang
+          go build -v -o audioloader server.go
+          tar -czvf audioloader-android-arm64-${{ github.ref_name }}.tar.gz audioloader static
+
       - name: Build and package for Linux and Android
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -57,11 +79,6 @@ jobs:
             export CGO_ENABLED=0
             go build -v -o audioloader server.go
             tar -czvf audioloader-linux-arm64-${{ github.ref_name }}.tar.gz audioloader static
-          elif [[ "${{ matrix.arch }}" == "arm64-android" ]]; then
-            export GOARCH=arm64 
-            export CGO_ENABLED=1
-            go build -v -o audioloader server.go
-            tar -czvf audioloader-linux-arm64-android-${{ github.ref_name }}.tar.gz audioloader static
           elif [[ "${{ matrix.arch }}" == "arm7" ]]; then
             export GOARCH=arm
             export GOOS=linux
