@@ -53,7 +53,8 @@ jobs:
           wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
           export ANDROID_HOME=$HOME/android
           mkdir -p $ANDROID_HOME/cmdline-tools
-          unzip commandlinetools-linux-9477386_latest.zip -d $ANDROID_HOME/cmdline-tools/latest
+          unzip commandlinetools-linux-9477386_latest.zip -d /tmp
+          mv /tmp/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platform-tools" "ndk-bundle" "platforms;android-21"
 
