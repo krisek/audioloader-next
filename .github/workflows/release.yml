@@ -30,8 +30,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
-        arch: [amd64, arm64, arm7]
+        os: [ubuntu-latest, windows-latest]
+        arch: [amd64, arm64, arm64-android, arm7]
 
     steps:
       - name: Checkout code
@@ -42,61 +42,83 @@ jobs:
         with:
           go-version: '1.23'
 
-      - name: Build for Linux
+      - name: Install Android SDK
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lib32stdc++6 lib32z1
+          wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+          unzip commandlinetools-linux-9477386_latest.zip -d $HOME/cmdline-tools
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          mv $HOME/cmdline-tools $ANDROID_HOME/cmdline-tools/tools
+          yes | $ANDROID_HOME/cmdline-tools/tools/bin/sdkmanager --licenses
+          $ANDROID_HOME/cmdline-tools/tools/bin/sdkmanager "platform-tools" "ndk-bundle" "platforms;android-21"
+
+      - name: Set up Android NDK environment
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk-bundle
+          export PATH=$ANDROID_NDK_HOME:$PATH
+
+      - name: Build and package for Linux and Android
+        if: matrix.os == 'ubuntu-latest'
         run: |
           if [[ "${{ matrix.arch }}" == "amd64" ]]; then
-            GOARCH=amd64
+            export GOARCH=amd64
+            export GOOS=linux
+            export CGO_ENABLED=0
+            go build -v -o audioloader server.go
+            tar -czf audioloader-linux-amd64-${{ github.ref_name }}.tar.gz audioloader static
           elif [[ "${{ matrix.arch }}" == "arm64" ]]; then
-            GOARCH=arm64
+            export GOARCH=arm64
+            export GOOS=linux
+            export CGO_ENABLED=0
+            go build -v -o audioloader server.go
+            tar -czf audioloader-linux-arm64-${{ github.ref_name }}.tar.gz audioloader static
+          elif [[ "${{ matrix.arch }}" == "arm64-android" ]]; then
+            export GOARCH=arm64 
+            export GOOS=android
+            export CGO_ENABLED=1
+            export CC=aarch64-linux-android21-clang
+            go build -v -o audioloader server.go
+            tar -czf audioloader-linux-arm64-android-${{ github.ref_name }}.tar.gz audioloader static
           elif [[ "${{ matrix.arch }}" == "arm7" ]]; then
-            GOARCH=arm
+            export GOARCH=arm
+            export GOOS=linux
+            export GOARM=7
+            export CGO_ENABLED=0
+            go build -v -o audioloader server.go
+            tar -czf audioloader-linux-arm7-${{ github.ref_name }}.tar.gz audioloader static
           fi
-          CGO_ENABLED=0 GOARCH=$GOARCH go build -v -o audioloader server.go
 
-      - if: matrix.arch == 'amd64'
-        name: create-archive for linux amd64
-        run: tar -czf audioloader-linux-amd64-${{ github.ref_name }}.tar.gz audioloader static
+      - name: Build for Windows
+        if: matrix.os == 'windows-latest'
+        run: |
+          if [ "${{ matrix.arch }}" == "amd64" ]; then
+            set CGO_ENABLED=0
+            set GOARCH=amd64
+            set GOOS=windows
+            go build -v -o audioloader.exe server.go
+            powershell Compress-Archive -Path audioloader.exe,static -DestinationPath audioloader-windows-amd64-${{ github.ref_name }}.zip
+          fi
 
-      - if: matrix.arch == 'arm64'
-        name: create-archive for linux arm64
-        run: tar -czf audioloader-linux-arm64-${{ github.ref_name }}.tar.gz audioloader static
-
-      - if: matrix.arch == 'arm7'
-        name: create-archive for linux arm7
-        run: tar -czf audioloader-linux-arm7-${{ github.ref_name }}.tar.gz audioloader static
-
-      - if: matrix.arch == 'amd64'
-        name: Upload Release Asset Linux amd64
-        id: upload-release-asset-linux-amd64
+      - name: Upload Release Asset
+        id: upload-release-asset
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.TOKEN }}
         with:
           upload_url: ${{ needs.once.outputs.upload_url }}
-          asset_path: ./audioloader-linux-amd64-${{ github.ref_name }}.tar.gz
-          asset_name: audioloader-linux-amd64-${{ github.ref_name }}.tar.gz
-          asset_content_type: application/x-tgz
-
-      - if: matrix.arch == 'arm64'
-        name: Upload Release Asset Linux arm64
-        id: upload-release-asset-linux-arm64
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.TOKEN }}
-        with:
-          upload_url: ${{ needs.once.outputs.upload_url }}
-          asset_path: ./audioloader-linux-arm64-${{ github.ref_name }}.tar.gz
-          asset_name: audioloader-linux-arm64-${{ github.ref_name }}.tar.gz
-          asset_content_type: application/x-tgz
-
-      - if: matrix.arch == 'arm7'
-        name: Upload Release Asset Linux arm7
-        id: upload-release-asset-linux-arm7
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.TOKEN }}
-        with:
-          upload_url: ${{ needs.once.outputs.upload_url }}
-          asset_path: ./audioloader-linux-arm7-${{ github.ref_name }}.tar.gz
-          asset_name: audioloader-linux-arm7-${{ github.ref_name }}.tar.gz
+          asset_path: |
+            ./audioloader-linux-amd64-${{ github.ref_name }}.tar.gz
+            ./audioloader-linux-arm64-${{ github.ref_name }}.tar.gz
+            ./audioloader-linux-arm64-android-${{ github.ref_name }}.tar.gz
+            ./audioloader-linux-arm7-${{ github.ref_name }}.tar.gz
+            ./audioloader-windows-amd64-${{ github.ref_name }}.tar.gz
+          asset_name: |
+            audioloader-linux-amd64-${{ github.ref_name }}.tar.gz
+            audioloader-linux-arm64-${{ github.ref_name }}.tar.gz
+            audioloader-linux-arm64-android-${{ github.ref_name }}.tar.gz
+            audioloader-linux-arm7-${{ github.ref_name }}.tar.gz
+            audioloader-windows-amd64-${{ github.ref_name }}.tar.gz
           asset_content_type: application/x-tgz
