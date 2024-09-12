@@ -5,38 +5,27 @@ import (
     "fmt"
     "github.com/krisek/gompd/mpd"
     "github.com/go-redis/redis/v8"
-    // "github.com/kkdai/youtube/v2"
     "github.com/robfig/cron/v3"
     "github.com/rs/cors"
     "html/template"
     "log"
     "net/http"
     "strconv"
-
     "os"
     "time"
     "strings"
     "context"
-
-
     "path/filepath"
     "regexp"
-
     "io/ioutil"
-
     "os/exec"
     "math/rand"
-
     "github.com/huin/goupnp"
     "github.com/huin/goupnp/dcps/av1"
     "net/url"
-
     "bytes"
-
     "github.com/PuerkitoBio/goquery"
 )
-
-
 
 type FileInfo struct {
     Directory    string                 `json:"directory,omitempty"`
@@ -58,9 +47,8 @@ type FileInfo struct {
 
 }
 
-var ctx = context.Background()
-
 var (
+    ctx = context.Background()
     redisClient *redis.Client
     bandcampEnabled, _ = strconv.ParseBool(getEnv("AL_BANDCAMP_ENABLED", "true"))
     clientDB = getEnv("AL_CLIENT_DB", getEnv("HOME", "/tmp") + "/Music/audioloader-db")
@@ -153,7 +141,6 @@ func main() {
     log.Printf("Starting server on: http://localhost:%v/static/", listeningPort)
     log.Fatal(http.ListenAndServe(":" + listeningPort, handler))
 }
-
 
 func coverHandler(w http.ResponseWriter, r *http.Request) {
     directory := r.URL.Query().Get("directory")
@@ -255,7 +242,6 @@ func coverHandler(w http.ResponseWriter, r *http.Request) {
     }
 }
 
-
 type ClientData struct {
     History []string `json:"history,omitempty"`
     Randomset []string `json:"randomset,omitempty"`
@@ -319,7 +305,6 @@ func readData(clientID string, dataType string) (ClientData, error) {
     return clientdata, nil
 }
 
-
 func reverse(s []map[string]interface{}) []map[string]interface{} {
     a := make([]map[string]interface{}, len(s))
     for i, v := range s {
@@ -333,7 +318,6 @@ func getRadioStationURL(stationUUID string) string {
     // Replace this with the actual implementation later
     return ""
 }
-
 
 func kodiHandler(w http.ResponseWriter, r *http.Request) {
     // Implement Kodi handler
@@ -478,7 +462,6 @@ func handleMPD(server, action, streamURL string) error {
     return nil
 }
 
-
 func randomChoice(albums []string, k int) []string {
     n := len(albums)
     if k >= n {
@@ -512,7 +495,6 @@ func min(a, b int) int {
 func isValidFileName(fileName string) bool {
     return regexp.MustCompile(`^[A-Za-z0-9_\-\.\/]+$`).MatchString(fileName)
 }
-
 
 func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
     clientID := r.URL.Query().Get("client_id")
@@ -615,7 +597,6 @@ func writeData(clientID, dataType string, clientData ClientData) error {
     return os.WriteFile(clientDataFile, data, 0644)
 }
 
-
 // FavouritesHandler handles adding or removing favourites.
 func favouritesHandler(w http.ResponseWriter, r *http.Request) {
     clientID := r.URL.Query().Get("client_id")
@@ -686,7 +667,6 @@ func remove(slice []string, item string) []string {
     return slice
 }
 
-
 // ActivePlayersHandler handles requests to retrieve active players
 func activePlayersHandler(w http.ResponseWriter, r *http.Request) {
     players := getActivePlayers()
@@ -694,7 +674,6 @@ func activePlayersHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(players)
 }
-
 
 func radioHistoryHandler(w http.ResponseWriter, r *http.Request) {
     clientID := r.URL.Query().Get("client_id")
@@ -872,7 +851,6 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(clientDataTree)
 }
 
-
 type RadioStation struct {
     Name     string `json:"name"`
     Favicon  string `json:"favicon"`
@@ -939,7 +917,6 @@ func searchRadioHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(content)
 }
-
 
 // searchBandcampHandler handles the search_bandcamp route
 func searchBandcampHandler(w http.ResponseWriter, r *http.Request) {
@@ -1454,9 +1431,8 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
         // Check if the playable URL is a YouTube video
         if strings.Contains(playable, "youtube") || strings.Contains(playable, "youtu.be") || strings.Contains(playable, "bandcamp.com") {
             playables, _ = getBandcampTrackURLs(playable)
+            playable = ""
         }
-        
-        log.Printf("Playable: %v", playable)
         
         mpdClient.Consume(true)
         
@@ -1465,10 +1441,10 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
         }
         
         if playable != "" {
+            log.Printf("Playable: %v", playable)
             mpdClient.Add(playable)
-        }
-
-        if len(playables) > 0 {
+        } else if len(playables) > 0 {
+            log.Printf("Playables: %v", playables)
             for _, item := range(playables) {
                 mpdClient.Add(item)
             }
@@ -1693,8 +1669,6 @@ func getActivePlayers() []map[string]interface{} {
     return players
 }
 
-
-
 func processCurrentSong(currentsong map[string]interface{}) map[string]interface{} {
     // Initialize states
     states := []string{"play", "pause", "stop"}
@@ -1760,7 +1734,6 @@ func processCurrentSong(currentsong map[string]interface{}) map[string]interface
 
     return currentsong
 }
-
 
 func pollCurrentSongHandler(w http.ResponseWriter, r *http.Request) {
     var err error
@@ -1882,7 +1855,6 @@ func currentSongHandler(w http.ResponseWriter, r *http.Request) {
     }
 }
 
-
 func countHandler(w http.ResponseWriter, r *http.Request) {
     // Get the directory from the request
     directory := r.URL.Query().Get("directory")
@@ -1921,7 +1893,6 @@ func countHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(content)
 }
-
 
 func toggleOutputHandler(w http.ResponseWriter, r *http.Request) {
     outputID := r.URL.Query().Get("output")
@@ -1970,7 +1941,6 @@ func toggleOutputHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(outputs)
 }
-
 
 func catchAllHandler(w http.ResponseWriter, r *http.Request) {
     // Get the absolute path of the requested URL
