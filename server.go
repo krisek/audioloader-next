@@ -1450,7 +1450,6 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
         // Check if the playable URL is a YouTube video
         if strings.Contains(playable, "youtube") || strings.Contains(playable, "youtu.be") || strings.Contains(playable, "bandcamp.com") {
             playables, _ = getBandcampTrackURLs(playable)
-            playable = ""
         }
         
         mpdClient.Consume(true)
@@ -1459,14 +1458,14 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
             mpdClient.Add("signal.mp3")
         }
         
-        if playable != "" {
-            log.Debug().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("Playable: %v", playable))
-            mpdClient.Add(playable)
-        } else if len(playables) > 0 {
+        if len(playables) > 0 {
             log.Debug().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("Playables: %v", playables))
             for _, item := range(playables) {
                 mpdClient.Add(item)
             }
+        } else if playable != "" {
+            log.Debug().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("Playable: %v", playable))
+            mpdClient.Add(playable)
         }
         
         mpdClient.Play(-1)
@@ -1474,6 +1473,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
         // Manage history
         clientID := r.URL.Query().Get("client_id")
         if r.URL.Query().Get("directory") != "" && clientID != "" {
+            log.Debug().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("writing history: %v", playable))
             ClientData, err := readData(clientID, "history")
             if err != nil {
                 log.Error().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("%v", err))
@@ -1517,7 +1517,9 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
             }			
 
         }
-        if url != "" && ! (strings.Contains(playable, "youtube") || strings.Contains(playable, "youtu.be") || strings.Contains(playable, "bandcamp.com"))  && clientID != "" {
+        if url != "" && playable != "" && ! (strings.Contains(playable, "youtube") || strings.Contains(playable, "youtu.be") || strings.Contains(playable, "bandcamp.com"))  && clientID != "" {
+            log.Debug().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("writing radio_history: %v", playable))
+
             clientData, err := readData(clientID, "radio_history")
             if err != nil {
                 clientData = ClientData{
@@ -1560,8 +1562,8 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
                 return
             }
         }
-        if url != "" && (strings.Contains(playable, "youtube") || strings.Contains(playable, "youtu.be") || strings.Contains(playable, "bandcamp.com")) && clientID != ""  {
-            
+        if url != "" && playable != "" && (strings.Contains(playable, "youtube") || strings.Contains(playable, "youtu.be") || strings.Contains(playable, "bandcamp.com")) && clientID != ""  {
+            log.Debug().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("writing bandcamp_history: %v", playable))
 
             clientData, err := readData(clientID, "bandcamp_history")
             if err != nil {
@@ -1591,7 +1593,7 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
 
             _, exists := clientData.Links[playable]
             if exists {
-                fmt.Printf("Key '%s' exists with value in clientData.Links\n", playable)
+                log.Debug().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("Key '%s' exists with value in clientData.Links\n", playable))
             } else {
                 // Update links information
                 albumInfo, _ := getBandcampAlbumInfo(playable)
