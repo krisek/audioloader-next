@@ -515,7 +515,8 @@ func isValidFileName(fileName string) bool {
     return regexp.MustCompile(`^[A-Za-z0-9_\-\.\/]+$`).MatchString(fileName)
 }
 
-func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
+
+func generateRandomSet(w http.ResponseWriter, r *http.Request) bool {
     clientID := r.URL.Query().Get("client_id")
     
     filter := r.URL.Query().Get("set_filter")
@@ -524,13 +525,11 @@ func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
     mpdClient, _ := getMPDClient(mpdHost, r.URL.Query().Get("mpd_port"))
     albums, err := mpdClient.List("album")
     if err != nil {
-        log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("Error listing albums: %v\n", err))
+        log.Debug().Str("function", "generateRandomSet").Msg(fmt.Sprintf("Error listing albums: %v\n", err))
         http.Error(w, "failed to generate randomset", http.StatusInternalServerError)
-        return
+        return false
     }
     
-    
-
     rand.Seed(time.Now().UnixNano()) // Seed for randomness
 
     for i := 0; len(clientData.Randomset) < 12 && i < 20; i++ {
@@ -559,38 +558,45 @@ func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
         }
     }
 
-    
     // Ensure randomset has unique albums and limit to 12
     clientData.Randomset = uniqueStrings(clientData.Randomset)[:min(12, len(clientData.Randomset))]
-    log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("clientdata unique - %v", clientData.Randomset))
+    log.Debug().Str("function", "generateRandomSet").Msg(fmt.Sprintf("clientdata unique - %v", clientData.Randomset))
 
-    
     // Save to file
     clientDataFile := filepath.Join(clientDB, fmt.Sprintf("%s.randomset.json", clientID))
 
-    log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("clientDataFile - %v", clientDataFile))
-    log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("filepath.HasPrefix(clientDataFile, clientDB)- %v %v", filepath.HasPrefix(clientDataFile, clientDB), isValidFileName(clientDataFile)))
+    log.Debug().Str("function", "generateRandomSet").Msg(fmt.Sprintf("clientDataFile - %v", clientDataFile))
+    log.Debug().Str("function", "generateRandomSet").Msg(fmt.Sprintf("filepath.HasPrefix(clientDataFile, clientDB)- %v %v", filepath.HasPrefix(clientDataFile, clientDB), isValidFileName(clientDataFile)))
     if clientID != "" && filepath.HasPrefix(clientDataFile, clientDB) && isValidFileName(clientDataFile) {
         file, err := os.Create(clientDataFile)
-        log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("clientDataFile created %v", clientDataFile))
+        log.Debug().Str("function", "generateRandomSet").Msg(fmt.Sprintf("clientDataFile created %v", clientDataFile))
         if err != nil {
-            log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("Error writing randomset file: %v\n", err))
+            log.Debug().Str("function", "generateRandomSet").Msg(fmt.Sprintf("Error writing randomset file: %v\n", err))
             http.Error(w, "failed to save randomset", http.StatusInternalServerError)
-            return
+            return false
         }
         defer file.Close()
 
         encoder := json.NewEncoder(file)
         if err := encoder.Encode(clientData); err != nil {
-            log.Debug().Str("function", "generateRandomSetHandler").Msg(fmt.Sprintf("Error encoding JSON: %v\n", err))
+            log.Debug().Str("function", "generateRandomSet").Msg(fmt.Sprintf("Error encoding JSON: %v\n", err))
             http.Error(w, "failed to save randomset", http.StatusInternalServerError)
-            return
+            return false
         }
     }
     mpdClient.Close()
-    // Send OK response
+    return true
+
+}
+
+func generateRandomSetHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
-    w.Write([]byte(`{"result": "ok"}`))
+    if(generateRandomSet(w, r)){
+        w.Write([]byte(`{"result": "ok"}`))
+    } else {
+        w.Write([]byte(`{"result": "nok"}`))
+    }
+
 
 
 }
@@ -800,7 +806,7 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
     if err != nil {
         log.Error().Str("function", "dataHandler").Msg(fmt.Sprintf("readData failed %s: %v\n", clientID, err))
     }
-
+    
     // Function to process the data for any string slice (History, Randomset, etc.)
     processDirectories := func(directories []string) []FileInfo {
         var fileInfos []FileInfo
@@ -851,6 +857,12 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
     // Check if History has data and process it
     if len(ClientData.History) > 0 {
         fileInfos = append(fileInfos, processDirectories(ClientData.History)...)
+    }
+
+    if dataPath == "randomset" && len(ClientData.Randomset) == 0 {
+        generateRandomSet(w, r)
+        dataHandler(w, r)
+        return
     }
 
     // Check if Randomset has data and process it
@@ -1589,8 +1601,6 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
             if len(clientData.BandcampHistory) > 36 {
                 clientData.BandcampHistory = clientData.BandcampHistory[len(clientData.BandcampHistory)-36:]
             }
-
-
             _, exists := clientData.Links[playable]
             if exists {
                 log.Debug().Str("function", "mpdProxyHandler:addplay").Msg(fmt.Sprintf("Key '%s' exists with value in clientData.Links\n", playable))
@@ -1606,10 +1616,6 @@ func mpdProxyHandler(w http.ResponseWriter, r *http.Request) {
                     Artist:     albumInfo["artist"].(string),
                 }
             }
-
-
-
-
 
             // Write the updated data back to the file
             if err := writeData(clientID, "bandcamp_history", clientData); err != nil {
