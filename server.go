@@ -59,6 +59,8 @@ var (
     listeningPort = getEnv("AL_LISTENING_PORT", "3400")
     libraryPath = getEnv("AL_LIBRARY_PATH", getEnv("HOME", "/media") + "/Music" )
     logLevel = getEnv("AL_LOG_LEVEL", "info")
+    maxBackoffDuration = 256 * time.Second // Maximum backoff of 256 seconds
+    maxRetryDuration   = 1 * time.Hour     // Total maximum retry duration of 1 hour
 )
 
 // Helper function to get environment variables with a default value
@@ -70,21 +72,41 @@ func getEnv(key, defaultVal string) string {
 }
 
 // getMPDClient creates a new MPD client connection using the provided host and port.
+// It retries the connection in case of failure with an exponential backoff strategy.
 func getMPDClient(host string, port string) (*mpd.Client, error) {
-    // Build the address string in the format "host:port"
     if port == "" {
         port = mpdPort
     }
     address := fmt.Sprintf("%s:%s", host, port)
     
-    // Dial the MPD server and return the client
-    client, err := mpd.Dial("tcp", address)
-    if err != nil {
-        log.Error().Str("function", "getMPDClient").Msg(fmt.Sprintf("Failed to connect to MPD server at %s: %v", address, err))
-        return nil, err
+    var backoff time.Duration = 1 * time.Second
+    var totalWaitTime time.Duration
+
+    for {
+        client, err := mpd.Dial("tcp", address)
+        if err == nil {
+            // Success! Return the client
+            return client, nil
+        }
+
+        // Log the error
+        log.Printf("Failed to connect to MPD server at %s: %v. Retrying in %v...", address, err, backoff)
+
+        // Check if we've exceeded the maximum retry duration
+        totalWaitTime += backoff
+        if totalWaitTime >= maxRetryDuration {
+            return nil, fmt.Errorf("could not connect to MPD server after multiple retries: %w", err)
+        }
+
+        // Sleep for the current backoff duration
+        time.Sleep(backoff)
+
+        // Increase the backoff time (exponential backoff)
+        backoff *= 2
+        if backoff > maxBackoffDuration {
+            backoff = maxBackoffDuration // Cap the backoff at the max duration
+        }
     }
-    
-    return client, nil
 }
 
 func main() {
